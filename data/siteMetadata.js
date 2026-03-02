@@ -1,7 +1,7 @@
 /** @type {import("pliny/config").PlinyConfig } */
 const siteMetadata = {
   title: 'Coco Moon | Distributed Systems & AI Infrastructure',
-  author: 'Coco Moon',
+  author: 'Charles Chen',
   headerTitle: 'Coco Moon',
   description:
     'Providing specialized software development and technical consulting services, focusing on high-performance distributed systems, real-time data infrastructure, and AI-driven data processing solutions for global clients.',
