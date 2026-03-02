@@ -23,8 +23,8 @@ echo "💾 正在提交更改 (跳过 Lint 检查)..."
 git commit -m "$COMMIT_MSG" --no-verify
 
 # 4. 推送到云端
-echo "☁️ 正在推送到 GitHub (origin main)..."
-git push origin main
+echo "☁️ 正在推送到 GitHub (master)..."
+git push master
 
 echo "✅ 发布完成！请等待 1 分钟，Vercel 正在自动构建您的新内容。"
 echo "🔗 访问地址: https://cocomoon-tech.com"
