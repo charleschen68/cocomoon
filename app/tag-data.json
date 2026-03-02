@@ -1,4 +1,10 @@
 {
+  "dofi": 1,
+  "ai": 1,
+  "streampark": 2,
+  "bigdata": 2,
+  "docker": 1,
+  "flink": 1,
   "multi-author": 1,
   "next-js": 1,
   "feature": 1
