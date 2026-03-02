@@ -1,9 +1,10 @@
 ---
-title: 告别“重装”噩梦：基于 Docker + StreamPark 构建极致的本地实时大数据开发环境
+title: '告别“重装”噩梦：基于 Docker + StreamPark 构建极致的本地实时大数据开发环境'
 date: '2026-03-02'
-tags: ['Docker', 'code', 'StreamPark']
+tags: ['Docker', 'Flink', 'StreamPark', 'BigData']
 draft: false
-summary: 本地开发环境
+summary: '通过极致的资源配额与容器化编排，将原本繁琐的大数据环境搭建压缩至秒级，大幅提升实时计算开发的人效比。'
+images: ['public/static/images/avatar_bak.png']
 ---
 
 ## 前言
