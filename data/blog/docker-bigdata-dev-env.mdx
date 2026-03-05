@@ -63,6 +63,7 @@ StreamPark 是这套环境的“大脑”，也是配置最复杂的地方。
     ```
     **这一步至关重要！** 它让容器复用宿主机的 Maven 缓存。否则每次在 StreamPark 提交作业，容器都要重新下载半天 Jar 包。
   - **Docker Socket 透传**：挂载 `/var/run/docker.sock`，让 StreamPark 有能力动态启动新的 Flink 任务容器。
+    ![StreamPark：打通本地与容器的“任督二脉”](/static/images/blog/docker-bigdata-dev-env/1.png)
 
 ### 3. 资源隔离与限制 (防雪崩)
 
@@ -82,12 +83,226 @@ StreamPark 是这套环境的“大脑”，也是配置最复杂的地方。
 - **用途**：
   - 当你怀疑代码有内存泄漏时，看 Grafana 的内存曲线。
   - 当任务处理不过来时，看 CPU 使用率是否被限制住了。
+    ![StreamPark：打通本地与容器的“任督二脉”](/static/images/blog/docker-bigdata-dev-env/2.png)
 
 ---
 
 ## 完整配置清单 (`docker-compose.yml`)
 
-_(此处插入您提供的完整 yaml 内容，建议加上必要的注释说明，如上文中我对 yaml 做的微调和解释)_
+```
+services:
+# --- [开发容器] ---
+  dev-runner:
+    build:
+      context: .devcontainer
+      dockerfile: Dockerfile
+    container_name: dev-box           # 域名: dev-box.orb.local
+    volumes:
+      - .:/workspace:cached
+      - ~/.ssh:/root/.ssh:ro
+    command: sleep infinity
+    network_mode: service:kafka
+
+  # --- 1. Apache Kafka (KRaft模式) ---
+  kafka:
+    image: apache/kafka:3.7.0
+    restart: on-failure  # 只要容器停了，就无限重启  no: 默认值。   on-failure: 只有在非正常退出（比如报错、OOM）时才重启（适合消费者程序）。
+    container_name: kafka
+    ports:
+      - "9092:9092"
+      - "9094:9094"
+    environment:
+      PATH: "/opt/kafka/bin:${PATH}"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://kafka.orb.local:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+
+      # 牺牲性能：在生产环境的多副本集群中，我们通常不建议设置这两个值，而是依赖副本复制来保证数据不丢失
+      # 策略 A：每收到 10000 条消息，就强制刷写一次磁盘
+      # 默认是 Long.MAX_VALUE (完全交给操作系统，不安全)
+      # KAFKA_LOG_FLUSH_INTERVAL_MESSAGES: 10000
+      # 策略 B：每隔 1000 毫秒（1秒），就强制刷写一次磁盘
+      # 默认是 null (完全交给操作系统)
+      KAFKA_LOG_FLUSH_INTERVAL_MS: 10000
+
+      # 显式设置堆内存为 1GB。
+      # 剩下 1GB 留给 Docker 容器内的操作系统、Page Cache 和堆外内存。
+      KAFKA_HEAP_OPTS: "-Xmx1G -Xms1G"
+
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'    # 限制最多使用 50% 的单核 CPU 能力
+          memory: 2048M    # 限制最多使用 512MB 内存
+    volumes:
+      # 【关键】持久化 Kafka 的消息日志和 Topic 信息
+      - ./data/kafka:/bitnami/kafka/data
+
+  # --- 3. Flink JobManager ---
+  flink-jobmanager:
+    user: root
+    image: flink:1.18
+    container_name: flink-jobmanager
+    ports:
+      - "8081:8081"
+    command: jobmanager
+    volumes:
+      - ./flink-data/checkpoints:/opt/flink/checkpoints
+      - ./flink-data/savepoints:/opt/flink/savepoints
+      - ./flink-data/usrlib:/opt/flink/usrlib
+
+      # 【关键】JobManager 也需要访问 Checkpoints 目录来恢复任务
+      - ./data/flink_checkpoints:/flink_checkpoints
+      # 如果需要上传 jar，可能也需要映射
+      - ./data/flink_uploads:/opt/flink/usr
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: 0.0.0.0
+        rest.bind-port: 8081
+        parallelism.default: 1
+        execution.checkpointing.interval: 10000
+        execution.checkpointing.mode: EXACTLY_ONCE
+        state.backend: hashmap
+        state.checkpoints.dir: file:///opt/flink/checkpoints
+        state.savepoints.dir: file:///opt/flink/savepoints
+    deploy:
+      resources:
+        limits:
+          memory: 1536M    # 限制最多使用 512MB 内存
+
+  # --- 4. Flink TaskManager ---
+  flink-taskmanager:
+    user: root
+    image: flink:1.18
+    restart: on-failure:5 # on-failure:5  # 👈 如果是因为代码逻辑错误导致的崩溃 尝试重启最多 5 次，如果还不行就算了
+    container_name: flink-taskmanager
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    volumes:
+      - ./flink-data/checkpoints:/opt/flink/checkpoints
+      - ./flink-data/savepoints:/opt/flink/savepoints
+      - ./flink-data/usrlib:/opt/flink/usrlib
+    scale: 1
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 3072m
+    deploy:
+      resources:
+        limits:
+          memory: 4096M    # 限制最多使用 4096MB 内存
+
+  # --- 5. MySQL ---
+  mysql:
+    image: mysql:8.0
+    container_name: streampark-db
+    platform: linux/amd64
+    environment:
+      MYSQL_ROOT_PASSWORD: streampark
+      MYSQL_DATABASE: streampark
+    volumes:
+      # 【关键】把 Mac 的 ./data/mysql 目录映射到容器内的 /var/lib/mysql
+      - ./data/mysql:/var/lib/mysql
+    ports:
+      - "3306:3306"
+    deploy:
+      resources:
+        limits:
+          memory: 1024M    # 限制最多使用 512MB 内存
+
+# --- 6. StreamPark ---
+  streampark:
+    user: root
+    image: apache/streampark:2.1.6
+    platform: linux/amd64
+    container_name: streampark
+    ports:
+      - "10000:10000"
+    # 修复点：以下所有配置必须缩进，要在 streampark 内部
+    env_file: .env
+    environment:
+      # 告诉 StreamPark 去哪里找 Flink
+      - FLINK_HOME=/opt/flink
+    depends_on:
+      - mysql
+      - flink-jobmanager
+      - kafka
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ~/.kube:/root/.kube
+      # 【核心修改】挂载完整的 Flink 引擎
+      # 这里的 ./flink-dist 是我们上一轮讨论中从容器里拷出来的，或者是你下载解压的 flink-1.18.1
+      # 请根据你实际存在的目录名修改（如果是拷出来的就用 flink-dist，下载的就用 flink-1.18.1）
+      - ./flink-1.18.1:/opt/flink
+
+      # 【保留】你的自定义 Jar 包 (这是子挂载，会覆盖进 /opt/flink/usrlib)
+      - ./flink-data/usrlib:/opt/flink/usrlib
+
+      # 1. 持久化 Docker socket (为了让 StreamPark 能启动 Flink 容器)
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 2. 【关键】持久化你的工作空间（上传的 Jar 包、构建的代码）
+      - ./data/streampark_workspace:/streampark/workspace
+      # 3. 【关键】挂载本地的 Maven 仓库（可选，但强烈建议，加速编译）
+      - ~/.m2:/root/.m2
+      # 4. 【关键】挂载 Flink Checkpoints 目录（为了数据容错）
+      - ./data/flink_checkpoints:/flink_checkpoints
+    # deploy:
+      # resources:
+      #   limits:
+      #     cpus: '0.50'    # 限制最多使用 50% 的单核 CPU 能力
+      #     memory: 2048M    # 限制最多使用 2048MB 内存
+
+# 可视化监测面板 start
+# 1. 监控数据采集器
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.0     # 使用较新版本支持 Mac (M1/M2 可能需要特定镜像，如果是 Intel 芯片用这个即可)
+    container_name: monitoring-cadvisor
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - "8080:8080"
+
+  # 2. 监控数据库
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: monitoring-prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    depends_on:
+      - cadvisor
+
+  # 3. 监控仪表盘
+  grafana:
+    image: grafana/grafana:latest
+    container_name: monitoring-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin # 初始密码设为 admin
+    depends_on:
+      - prometheus
+
+# 可视化监测面板 end
+
+volumes:
+  kafka_data:
+  mysql_data:
+```
 
 > **特别提示**：对于 M 系列芯片用户，MySQL 镜像建议指定 `platform: linux/amd64`，虽然会有性能损耗，但能避免 ARM 架构下的兼容性玄学问题。
 
