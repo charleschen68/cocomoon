@@ -1,0 +1,72 @@
+---
+title: '我如何用“脑手分离”架构，手搓了一个私人助理 Dofi'
+date: '2026-03-02'
+tags: ['dofi', 'ai', 'StreamPark', 'BigData']
+draft: false
+summary: '使用大模型 + 容器化agent打造安全可控的智能助手'
+images: ['static/images/avatar_bak.png']
+---
+
+#### 01. 缘起：受够了只能“陪聊”的 AI
+
+现在的 AI Agent 遍地走，但都有一个通病：**要么太“虚”，要么太“独”。**
+
+- **太虚**：ChatGPT 很强，但它在网页里，摸不到我的终端，帮我改个 Flink 配置还得我手动复制粘贴。
+- **太独**：Cursor 很强，但它只活在 IDE 里，我想让它帮我查查 Docker 容器状态，或者在钉钉发个报警，它就两眼一抹黑。
+
+我要的不是一个陪聊的 Chatbot，而是一个能**真正接管键鼠、替我干脏活累活的“数字员工”**。
+
+于是，**Dofi** 诞生了。
+
+#### 02. 架构设计：为什么不仅是“写个脚本”？
+
+很多人的自动化脚本就是“一把梭”，直接在宿主机跑个 Python 脚本接 LLM。这是**灾难级**的设计：**把 root 权限交给这就喜欢胡说八道的 AI，你的 Mac 离重装系统只差一个 `rm -rf /`。**
+
+Dofi 采用了**“大脑在云端（容器），手脚在人间（宿主机）”**的 **Split-Brain（脑手分离）架构**：
+
+Plaintext
+
+```
+[ 你的 Mac (Host) ]  <────────── 防火墙/API ──────────>  [ Docker 容器 (Brain) ]
+       │                                                         │
+   ✋ 手 (Server)                                            🧠 脑 (Agent)
+(执行 Skills, 控制键鼠)                                    (思考, 调用 LLM, 聊 TG)
+       │                                                         │
+   [ Flink ] [ Chrome ]                                   [ Telegram ] [ Ollama ]
+```
+
+- **🧠 脑 (The Brain)**：运行在 Docker 容器里。环境脏乱差无所谓，装各种 Python 依赖，挂了就重启。它负责思考、和 Telegram 交互、通过 Ollama 调用本地大模型。**它没有权限直接操作我的 Mac。**
+- **✋ 手 (The Hand)**：运行在 Mac 宿主机上的一个极简 Flask 服务。它像一个尽职的“保安”，只开放有限的 `skills` 接口（如：`open_flink`, `restart_container`）。
+
+**架构优势**：
+
+1. **安全性 (Security)**：就算 AI 疯了想删库，它只能炸掉 Docker 容器，伤不到宿主机分毫。
+2. **环境隔离 (Isolation)**：Python 环境再也不会污染我的 Mac 系统，`pip install` 随便跑。
+3. **解耦 (Decoupling)**：大脑可以换（接 OpenAI 或 DeepSeek），手也可以换（换台 Windows 也能跑），互不影响。
+
+#### 03. 核心功能：不仅仅是自动化
+
+Dofi 不是玩具，它是我的 **SRE + 秘书**。
+
+- **⚡️ 运维 Flink 不再痛苦** 以前查看任务状态：打开 VPN -> 打开 Chrome -> 输地址 -> 登录 -> 找 Dashboard。 **现在**：躺在床上对 Telegram 说一句：“查看 Flink 状态”。 Dofi 大脑解析指令 -> 指挥“手”打开浏览器 -> 截图 -> 发回 Telegram。
+
+- **🗣 优雅的交互** 拒绝后台静默崩溃。当 Dofi 需要我输入验证码时，它不会傻傻地在后台报错 `EOFError`，而是调用 AppleScript 在我的屏幕上**弹出一个原生对话框**。这才是人机交互该有的样子。
+
+#### 04. 那些“踩坑”带来的技术深度
+
+在开发 Dofi 的过程中，解决的问题本身就是一场架构面试：
+
+- **Docker 通信**：如何让容器内的大脑访问宿主机的 Flask？（利用 `host.docker.internal` 网络桥接）。
+- **进程守护**：如何防止“双胞胎”进程冲突？（手写 PID 锁文件 + Telegram `Conflict` 错误处理机制）。
+- **上下文注入**：如何让 AI 记住我的习惯？（动态加载 System Prompt，区分私有配置与通用逻辑）。
+
+#### 05. 开源与未来
+
+Dofi 目前已经能够帮我完成：
+
+- ✅ 监控 Docker 容器状态
+- ✅ 自动打开工作环境
+- ✅ 快速检索 Flink 任务
+- ✅ 通过 Telegram 远程遥控 Mac
+
+它只有几百行代码，但体现的是**“控制反转”**和**“最小权限原则”**。如果你也想拥有一个**听话、安全、且懂你**的 AI 员工，欢迎关注我的项目。
