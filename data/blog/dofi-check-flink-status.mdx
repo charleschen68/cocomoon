@@ -1,9 +1,9 @@
 ---
 title: '我如何用“脑手分离”架构，手搓了一个私人助理 Dofi'
-date: '2026-03-02'
-tags: ['dofi', 'ai', 'StreamPark', 'BigData']
+date: '2026-03-04'
+tags: ['dofi', 'ai', 'BigData']
 draft: false
-summary: '使用大模型 + 容器化agent打造安全可控的智能助手'
+summary: '使用dofi查看flink任务状态、容器状态、重启容器'
 images: ['static/images/avatar_bak.png']
 ---
 
@@ -21,10 +21,8 @@ images: ['static/images/avatar_bak.png']
 #### 02. 架构设计：为什么不仅是“写个脚本”？
 
 很多人的自动化脚本就是“一把梭”，直接在宿主机跑个 Python 脚本接 LLM。这是**灾难级**的设计：**把 root 权限交给这就喜欢胡说八道的 AI，你的 Mac 离重装系统只差一个 `rm -rf /`。**
-
+![dofi加载的技能](/static/images/blog/dofi-check-flink-status/1.png)
 Dofi 采用了**“大脑在云端（容器），手脚在人间（宿主机）”**的 **Split-Brain（脑手分离）架构**：
-
-Plaintext
 
 ```
 [ 你的 Mac (Host) ]  <────────── 防火墙/API ──────────>  [ Docker 容器 (Brain) ]
