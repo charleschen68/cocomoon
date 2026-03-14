@@ -47,7 +47,7 @@ images: ['static/images/avatar_bak.png']
 - **组合拳：** 普通 Kafka 管道 + 携带变更信息的 Canal 格式。
 - **为什么这么搭：** \* Canal 格式能把 MySQL 的 `UPDATE` 拆解成 `UPDATE_BEFORE` 和 `UPDATE_AFTER`。
   - Flink 收到后，能自动识别哪些是旧值、哪些是新值。
-- **注意事项：** **解析成本最高**。Canal 格式比普通 JSON 胖出一大圈，如果每秒几十万 QPS，解析它会消耗掉你 M4 Pro 大量的 CPU。
+- **注意事项：** **解析成本最高**。Canal 格式比普通 JSON 胖出一大圈，如果每秒几十万 QPS，解析它会消耗掉大量的 CPU。
 
 ### 方案 B：Upsert-Kafka + `json`（高性能状态下沉）
 
@@ -65,11 +65,11 @@ images: ['static/images/avatar_bak.png']
 
 ---
 
-## 四、 $50w 年薪级别的“避坑”深度解析
+## 四、 “避坑”深度解析
 
 ### 1. 序列化成本
 
-`canal-json` 包含了 `old`、`data`、`type` 等大量元数据。在 **高吞吐（每秒 10w+）** 场景下，解析 `canal-json` 的 CPU 开销比普通 `json` 高出约 $20% \sim 30% $。
+`canal-json` 包含了 `old`、`data`、`type` 等大量元数据。在 **高吞吐（每秒 10w+）** 场景下，解析 `canal-json` 的 CPU 开销比普通 `json` 高出约 $20% ~ 30% $。
 
 - **高薪操作：** 如果你只需要 `INSERT` 数据，请强制使用普通的 `json` 格式以节省资源。
 
