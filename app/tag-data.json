@@ -1,10 +1,13 @@
 {
-  "dofi": 1,
-  "ai": 1,
-  "streampark": 2,
-  "bigdata": 2,
+  "flink": 4,
+  "kafka": 3,
+  "connector": 3,
+  "format": 3,
+  "dofi": 3,
+  "ai": 3,
+  "bigdata": 4,
   "docker": 1,
-  "flink": 1,
+  "streampark": 1,
   "multi-author": 1,
   "next-js": 1,
   "feature": 1
