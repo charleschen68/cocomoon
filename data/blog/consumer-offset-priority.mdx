@@ -110,7 +110,3 @@ CREATE TABLE kafka_source (
 **总结：**
 
 Flink 任务的生命周期管理不仅仅是写几行 SQL。理解 Checkpoint、DDL 配置与 Kafka 服务端配置之间的优先级关系，是构建高可靠实时数仓的基石。在需要数据回溯时，优先使用 **Hint + Timestamp Mode**，坚决摒弃通过“改 Group ID”这种不可控的方式来管理位点。
-
-```
-
-```
