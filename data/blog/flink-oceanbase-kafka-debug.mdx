@@ -3,7 +3,7 @@ title: 'Flink 诡异报错排查：为什么我的 Kafka Sink 会“间歇性失
 date: '2026-04-02'
 tags: ['flink', 'oceanbase', 'kafka', 'offset']
 draft: false
-summary: ''
+summary: '遇到报错不要慌，所有的“玄学”背后都是物理限制。'
 images: ['static/images/avatar_bak.png']
 ---
 
@@ -116,4 +116,4 @@ CREATE TABLE dw_address_book_sink2kafka (
 2. **看 Checkpoint (检查点)**：如果 CK 频率性失败，说明任务在不断重启，优先查 TaskManager 日志里的第一条 `ERROR`。
 3. **看 Environment (环境)**：不要迷信代码。`telnet` 端口通不通？Kafka Topic 限制是多少？有时候解决问题的钥匙在代码之外。
 
-**专家寄语：** 遇到报错不要慌，所有的“玄学”背后都是物理限制。
+**寄语：** 遇到报错不要慌，所有的“玄学”背后都是物理限制。
