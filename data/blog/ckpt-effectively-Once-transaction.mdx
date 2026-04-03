@@ -78,7 +78,8 @@ ckpt-effectively-Once-transaction.mdx
 
 ### 2. Effectively-Once（等效一次）
 
-这是一种“曲线救国”的智慧，也是大厂生产环境中最常用的方案。这是解决分布式重复写入最经济、最稳健的方法。
+我们从不迷信“Exactly-once（精确一次）”，因为它的成本（如 XA 事务）极其昂贵。我们追求的是 **“最终一致性”**。
+这是一种“曲线救国”的智慧，解决分布式重复写入最经济、最稳健的方法，也是大厂生产环境中最常用的方案。
 
 - **核心**：**At-Least-Once + 幂等性（Idempotency） = Exactly-Once。**
 - **原理**：虽然消息可能发了多次，但由于下游（如 MySQL、Redis、HBase）具备幂等处理能力（比如 `INSERT ON DUPLICATE KEY UPDATE` 或通过主键去重），最终的结果就像只处理了一次一样。

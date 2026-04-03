@@ -27,9 +27,7 @@ export default function Footer() {
           <Link href="/">{siteMetadata.title}</Link>
         </div>
         <div className="mb-8 text-sm text-gray-500 dark:text-gray-400">
-          <Link href="https://github.com/timlrx/tailwind-nextjs-starter-blog">
-            Cocomoon Tech Engineering
-          </Link>
+          <Link href="https://github.com//saxonchen86">Cocomoon Tech Engineering</Link>
         </div>
       </div>
     </footer>
