@@ -83,6 +83,8 @@ images: ['static/images/avatar_bak.png']
 
 在这一系列的调优之后，我让这个“核动力” AI 对我当前的项目结构进行了深度拆解。以下是它的分析报告：
 
+````
+
 #### 📂 项目结构深度解析报告 (Project Structure Analysis)
 
 ```
@@ -94,20 +96,19 @@ images: ['static/images/avatar_bak.png']
 
 ```
 
-.  
-├── dataflow/ # 数据生成模块  
-│ └── user_click_gen_data.py # 用户点击数据生成脚本  
-├── datastream/ # 核心数据流处理模块  
-│ ├── kafka2milvus/ # Kafka到Milvus数据流处理  
-│ ├── employee-message-processor/ # 员工消息处理器  
-│ └── realtime-riskcontrol-embedding-job/ # 实时风险控制嵌入作业  
-├── pom.xml # 项目根POM文件  
-├── build.sh # 构建脚本  
-├── docker-compose.yml # Docker容器编排配置  
-├── schema.sql # 数据库模式定义  
+.
+├── dataflow/ # 数据生成模块
+│ └── user_click_gen_data.py # 用户点击数据生成脚本
+├── datastream/ # 核心数据流处理模块
+│ ├── kafka2milvus/ # Kafka到Milvus数据流处理
+│ ├── employee-message-processor/ # 员工消息处理器
+│ └── realtime-riskcontrol-embedding-job/ # 实时风险控制嵌入作业
+├── pom.xml # 项目根POM文件
+├── build.sh # 构建脚本
+├── docker-compose.yml # Docker容器编排配置
+├── schema.sql # 数据库模式定义
 └── requirements.txt # Python依赖列表
 
-````
 
 ## 核心模块说明
 

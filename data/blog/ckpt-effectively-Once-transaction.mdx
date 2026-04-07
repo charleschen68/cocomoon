@@ -1,5 +1,5 @@
 ---
-title: '为什么 Checkapoint 没成功，下游却有数据？'
+title: '为什么 Checkpoint 没成功，下游却有数据？'
 date: '2026-04-03'
 tags: ['ckpt', 'effectively-Once', 'transaction', 'At-Least-Once', 'idempotency']
 draft: false
@@ -63,6 +63,12 @@ ckpt-effectively-Once-transaction.mdx
 ## 三、 50w 刀架构师的修养：如何优雅地处理“抢跑”？
 
 面对 Checkpoint 失败与数据入库的不一致，成熟的架构师不会去死磕“百分之百不漏不重”，而是根据业务场景做权衡（Trade-off）。
+
+语义,数据丢失,数据重复,性能开销,典型技术
+At-Most-Once,允许,不允许,极低,"UDP, Simple Log"
+At-Least-Once,不允许,允许,中等,"Kafka Default, Flume"
+Exactly-Once,不允许,不允许,高,Flink + Kafka 2PC
+Effectively-Once,不允许,逻辑上不允许,中等,"SQL Upsert, Redis SETNX"
 
 ### 1. At-Most-Once（至多一次）
 

@@ -8,7 +8,7 @@ const siteMetadata = {
   language: 'en-us',
   theme: 'system', // system, dark or light
   siteUrl: 'http://www.cocomoon-tech.com/',
-  // siteRepo: 'https://github.com//saxonchen86',
+  siteRepo: 'https://github.com//saxonchen86',
   siteLogo: `${process.env.BASE_PATH || ''}/static/images/logo.png`,
   socialBanner: `${process.env.BASE_PATH || ''}/static/images/twitter-card.png`,
   // mastodon: 'https://mastodon.social/@mastodonuser',
