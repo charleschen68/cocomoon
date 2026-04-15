@@ -20,25 +20,32 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: yarn
+          cache: npm # 修改 1: 从 yarn 改为 npm
+
       - id: configurepages
         uses: actions/configure-pages@v5
+
       - name: Restore cache
         uses: actions/cache@v4
         with:
           path: .next/cache
-          key: ${{ runner.os }}-nextjs-${{ hashFiles('**/yarn.lock') }}-${{ hashFiles('**.[jt]s', '**.[jt]sx') }}
+          # 修改 2: 计算 hash 的文件从 yarn.lock 替换为 package-lock.json
+          key: ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('**.[jt]s', '**.[jt]sx') }}
           restore-keys: |
-            ${{ runner.os }}-nextjs-${{ hashFiles('**/yarn.lock') }}-
-      - run: yarn
-      - run: yarn build
+            ${{ runner.os }}-nextjs-${{ hashFiles('**/package-lock.json') }}-
+
+      - run: npm ci # 修改 3: 严谨的 CI 环境安装命令
+
+      - run: npm run build # 修改 4: 使用 npm 运行 build 脚本
         env:
           EXPORT: 1
           UNOPTIMIZED: 1
           BASE_PATH: ${{ steps.configurepages.outputs.base_path }}
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./out
