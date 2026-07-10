@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CocoMoon — Design Like Anthropic</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        /* Palette */
+        --parchment: #f5f4ed;
+        --ivory: #faf9f5;
+        --warm-sand: #e8e6dc;
+        --border-cream: #f0eee6;
+        --border-warm: #e8e6dc;
+        --ring-warm: #d1cfc5;
+        --charcoal-warm: #4d4c48;
+        --olive-gray: #5e5d59;
+        --stone-gray: #87867f;
+        --near-black: #141413;
+        --dark-surface: #30302e;
+        --warm-silver: #b0aea5;
+        --terracotta: #c96442;
+        --coral: #d97757;
+        --focus-blue: #3898ec;
+
+        /* Type */
+        --serif: Georgia, 'Times New Roman', serif;
+        --sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        --mono:
+          'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          'Liberation Mono', 'Courier New', monospace;
+      }
+
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        font-family: var(--sans);
+        font-size: 16px;
+        line-height: 1.6;
+        color: var(--near-black);
+        background: var(--parchment);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+      }
+
+      /* Typography */
+      h1,
+      h2,
+      h3,
+      h4,
+      h5,
+      h6 {
+        font-family: var(--serif);
+        font-weight: 500;
+        line-height: 1.2;
+        color: var(--near-black);
+      }
+
+      .display {
+        font-family: var(--serif);
+        font-size: 3.5rem;
+        font-weight: 500;
+        line-height: 1.1;
+        letter-spacing: normal;
+      }
+      .section-heading {
+        font-family: var(--serif);
+        font-size: 3rem;
+        font-weight: 500;
+        line-height: 1.2;
+      }
+      .sub-heading {
+        font-family: var(--serif);
+        font-size: 2rem;
+        font-weight: 500;
+        line-height: 1.1;
+      }
+      .sub-heading-sm {
+        font-family: var(--serif);
+        font-size: 1.6rem;
+        font-weight: 500;
+        line-height: 1.2;
+      }
+      .body-serif {
+        font-family: var(--serif);
+        font-size: 1.06rem;
+        font-weight: 400;
+        line-height: 1.6;
+      }
+      .body-large {
+        font-family: var(--sans);
+        font-size: 1.25rem;
+        font-weight: 400;
+        line-height: 1.6;
+        color: var(--olive-gray);
+      }
+      .body {
+        font-family: var(--sans);
+        font-size: 1rem;
+        font-weight: 400;
+        line-height: 1.6;
+        color: var(--olive-gray);
+      }
+      .body-small {
+        font-family: var(--sans);
+        font-size: 0.94rem;
+        font-weight: 400;
+        line-height: 1.6;
+        color: var(--stone-gray);
+      }
+      .caption {
+        font-family: var(--sans);
+        font-size: 0.88rem;
+        font-weight: 400;
+        line-height: 1.43;
+        color: var(--stone-gray);
+      }
+      .overline {
+        font-family: var(--sans);
+        font-size: 0.63rem;
+        font-weight: 400;
+        line-height: 1.6;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        color: var(--stone-gray);
+      }
+
+      /* Container */
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+
+      /* Navigation */
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        background: var(--parchment);
+        border-bottom: 1px solid var(--border-cream);
+      }
+
+      .nav-inner {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 0 24px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: 64px;
+      }
+
+      .nav-logo {
+        font-family: var(--serif);
+        font-size: 1.5rem;
+        font-weight: 500;
+        color: var(--near-black);
+        text-decoration: none;
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 32px;
+        list-style: none;
+      }
+      .nav-links a {
+        font-family: var(--sans);
+        font-size: 0.94rem;
+        font-weight: 400;
+        color: var(--olive-gray);
+        text-decoration: none;
+        transition: color 0.15s;
+      }
+      .nav-links a:hover {
+        color: var(--near-black);
+      }
+
+      /* Buttons */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0;
+        padding: 0px 12px 0px 8px;
+        border: none;
+        border-radius: 8px;
+        font-family: var(--sans);
+        font-weight: 400;
+        cursor: pointer;
+        transition:
+          background-color 0.15s,
+          box-shadow 0.15s;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+
+      .btn-brand {
+        background: var(--terracotta);
+        color: var(--ivory);
+        font-weight: 500;
+        box-shadow:
+          var(--terracotta) 0px 0px 0px 0px,
+          var(--terracotta) 0px 0px 0px 1px;
+      }
+      .btn-brand:hover {
+        background: var(--coral);
+        box-shadow:
+          var(--terracotta) 0px 0px 0px 0px,
+          var(--coral) 0px 0px 0px 1px;
+      }
+
+      .btn-warm-sand {
+        background: var(--warm-sand);
+        color: var(--charcoal-warm);
+        box-shadow:
+          var(--warm-sand) 0px 0px 0px 0px,
+          var(--ring-warm) 0px 0px 0px 1px;
+      }
+      .btn-warm-sand:hover {
+        background: var(--border-warm);
+      }
+
+      .btn-white {
+        background: var(--ivory);
+        color: var(--near-black);
+        padding: 8px 16px 8px 12px;
+        border-radius: 12px;
+        box-shadow: var(--ivory) 0px 0px 0px 0px;
+      }
+      .btn-white:hover {
+        background: var(--warm-sand);
+      }
+
+      /* ==================== HERO ==================== */
+      .hero {
+        padding: 120px 0 100px;
+        text-align: center;
+      }
+
+      .hero .overline {
+        display: block;
+        margin-bottom: 16px;
+      }
+
+      .hero .display {
+        max-width: 720px;
+        margin: 0 auto 24px;
+        color: var(--near-black);
+      }
+
+      .hero .body-large {
+        max-width: 560px;
+        margin: 0 auto 40px;
+      }
+
+      .hero-actions {
+        display: flex;
+        gap: 16px;
+        justify-content: center;
+        flex-wrap: wrap;
+      }
+
+      /* ==================== FEATURES ==================== */
+      .features {
+        background: var(--ivory);
+        border-top: 1px solid var(--border-cream);
+        border-bottom: 1px solid var(--border-cream);
+      }
+
+      .features-inner {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 100px 24px;
+      }
+
+      .features-header {
+        text-align: center;
+        margin-bottom: 64px;
+      }
+
+      .features-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 24px;
+        max-width: 960px;
+        margin: 0 auto;
+      }
+
+      .feature-card {
+        background: var(--parchment);
+        border: 1px solid var(--border-cream);
+        border-radius: 8px;
+        padding: 32px;
+        box-shadow: rgba(0, 0, 0, 0.05) 0px 4px 24px;
+        transition: box-shadow 0.15s;
+      }
+      .feature-card:hover {
+        box-shadow: rgba(0, 0, 0, 0.08) 0px 4px 24px;
+      }
+
+      .feature-card .overline {
+        margin-bottom: 12px;
+      }
+      .feature-card .sub-heading-sm {
+        margin-bottom: 12px;
+      }
+      .feature-card .body {
+        margin-bottom: 0;
+      }
+
+      /* ==================== DARK SECTION ==================== */
+      .dark-section {
+        background: var(--near-black);
+        color: var(--near-black);
+      }
+
+      .dark-section .section-heading,
+      .dark-section .sub-heading,
+      .dark-section .sub-heading-sm {
+        color: var(--ivory);
+      }
+
+      .dark-inner {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 100px 24px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 80px;
+        align-items: center;
+      }
+
+      .dark-content .overline {
+        color: var(--stone-gray);
+      }
+      .dark-content .body-large {
+        color: var(--warm-silver);
+      }
+      .dark-content .body {
+        color: var(--warm-silver);
+      }
+
+      .dark-visual {
+        background: var(--dark-surface);
+        border-radius: 16px;
+        border: 1px solid var(--dark-surface);
+        box-shadow: rgba(0, 0, 0, 0.3) 0px 8px 32px;
+        padding: 40px;
+      }
+
+      .chat-line {
+        margin-bottom: 20px;
+        display: flex;
+        gap: 16px;
+      }
+
+      .chat-avatar {
+        width: 32px;
+        height: 32px;
+        border-radius: 8px;
+        background: var(--terracotta);
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .chat-avatar-circle {
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: var(--warm-sand);
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .chat-bubble {
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 12px;
+        padding: 16px 20px;
+        font-family: var(--sans);
+        font-size: 0.94rem;
+        line-height: 1.6;
+        color: var(--warm-silver);
+        max-width: 85%;
+      }
+
+      .chat-line.user {
+        flex-direction: row-reverse;
+      }
+      .chat-line.user .chat-bubble {
+        background: rgba(201, 100, 66, 0.15);
+      }
+
+      /* ==================== CAPABILITIES ==================== */
+      .capabilities {
+        padding: 100px 24px;
+      }
+
+      .capabilities-inner {
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      .capabilities-header {
+        text-align: center;
+        margin-bottom: 64px;
+      }
+
+      .capabilities-list {
+        max-width: 800px;
+        margin: 0 auto;
+      }
+
+      .capability-item {
+        display: flex;
+        gap: 20px;
+        padding: 28px 0;
+        border-top: 1px solid var(--border-cream);
+      }
+      .capability-item:last-child {
+        border-bottom: 1px solid var(--border-cream);
+      }
+
+      .capability-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+        background: var(--warm-sand);
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .capability-text .sub-heading-sm {
+        font-size: 1.3rem;
+        margin-bottom: 6px;
+      }
+      .capability-text .body {
+        margin: 0;
+      }
+
+      /* ==================== CTA ==================== */
+      .cta-section {
+        background: var(--ivory);
+        border-top: 1px solid var(--border-cream);
+        text-align: center;
+        padding: 100px 24px;
+      }
+
+      .cta-section .section-heading {
+        margin-bottom: 16px;
+      }
+      .cta-section .body-large {
+        margin-bottom: 40px;
+      }
+
+      /* ==================== FOOTER ==================== */
+      footer {
+        border-top: 1px solid var(--border-cream);
+        padding: 48px 24px;
+      }
+
+      .footer-inner {
+        max-width: 1200px;
+        margin: 0 auto;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .footer-inner .overline {
+        color: var(--stone-gray);
+      }
+      .footer-links {
+        display: flex;
+        gap: 24px;
+        list-style: none;
+      }
+      .footer-links a {
+        font-family: var(--sans);
+        font-size: 0.88rem;
+        color: var(--stone-gray);
+        text-decoration: none;
+      }
+      .footer-links a:hover {
+        color: var(--olive-gray);
+      }
+
+      /* ==================== RESPONSIVE ==================== */
+      @media (max-width: 991px) {
+        .display {
+          font-size: 2.5rem;
+        }
+        .section-heading {
+          font-size: 2.25rem;
+        }
+        .features-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .dark-inner {
+          grid-template-columns: 1fr;
+          gap: 48px;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .hero {
+          padding: 80px 0 64px;
+        }
+        .display {
+          font-size: 2rem;
+        }
+        .section-heading {
+          font-size: 1.75rem;
+        }
+        .sub-heading {
+          font-size: 1.5rem;
+        }
+        .features-grid {
+          grid-template-columns: 1fr;
+        }
+        .nav-links {
+          display: none;
+        }
+        .footer-inner {
+          flex-direction: column;
+          gap: 16px;
+          text-align: center;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .feature-card,
+        .btn,
+        .nav-links a {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Navigation -->
+    <nav>
+      <div class="nav-inner">
+        <a href="#" class="nav-logo">CocoMoon</a>
+        <ul class="nav-links">
+          <li><a href="#features">Features</a></li>
+          <li><a href="#capabilities">Capabilities</a></li>
+          <li><a href="#about">About</a></li>
+          <li><a href="#" class="btn btn-warm-sand">Get Started</a></li>
+        </ul>
+      </div>
+    </nav>
+
+    <!-- Hero -->
+    <section class="hero">
+      <div class="container">
+        <span class="overline">Introducing a new era of design</span>
+        <h1 class="display">Thoughtful design built for how teams actually work</h1>
+        <p class="body-large">
+          Warm, grounded, and designed to reduce friction. CocoMoon brings a calm intelligence to
+          complex workflows.
+        </p>
+        <div class="hero-actions">
+          <a href="#" class="btn btn-brand">Start Building</a>
+          <a href="#features" class="btn btn-warm-sand">Learn more</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section class="features" id="features">
+      <div class="features-inner">
+        <div class="features-header">
+          <span class="overline">Core strengths</span>
+          <h2 class="section-heading" style="margin-top: 12px">Built on fundamentals, not fads</h2>
+        </div>
+        <div class="features-grid">
+          <div class="feature-card">
+            <span class="overline">Speed</span>
+            <h3 class="sub-heading-sm">Instant feedback</h3>
+            <p class="body">
+              Changes propagate in real-time. No spinning, no waiting, no reloading the entire page.
+            </p>
+          </div>
+          <div class="feature-card">
+            <span class="overline">Clarity</span>
+            <h3 class="sub-heading-sm">Clear signal, low noise</h3>
+            <p class="body">
+              Every element earns its place. No filler cards, no decorative grids, no arbitrary
+              metrics.
+            </p>
+          </div>
+          <div class="feature-card">
+            <span class="overline">Adaptability</span>
+            <h3 class="sub-heading-sm">Works at any scale</h3>
+            <p class="body">
+              From a small team to an enterprise — the system grows with you without adding
+              complexity.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Dark Section -->
+    <section class="dark-section" id="about">
+      <div class="dark-inner">
+        <div class="dark-content">
+          <span class="overline">How it works</span>
+          <h2 class="section-heading" style="margin-top: 12px">
+            A system that thinks alongside you
+          </h2>
+          <p class="body-large" style="margin-top: 16px">
+            CocoMoon doesn't force you into a rigid process. It adapts to your workflow —
+            understanding context, surfacing what matters, and staying out of the way when you just
+            need to focus.
+          </p>
+          <div style="margin-top: 32px">
+            <a href="#" class="btn btn-brand" style="background: #c96442"
+              >Explore the architecture</a
+            >
+          </div>
+        </div>
+        <div class="dark-visual">
+          <div class="chat-line user">
+            <div class="chat-avatar-circle">
+              <svg width="16" height="16" viewBox="0 0 16 16">
+                <circle cx="8" cy="8" r="5" fill="#4d4c48" />
+              </svg>
+            </div>
+            <div class="chat-bubble">Design a dashboard with real-time data visualization</div>
+          </div>
+          <div class="chat-line">
+            <div class="chat-avatar">
+              <svg width="16" height="16" viewBox="0 0 16 16">
+                <rect x="3" y="3" width="10" height="10" rx="2" fill="#faf9f5" />
+              </svg>
+            </div>
+            <div class="chat-bubble">
+              Here's a layout. I've optimized for monitoring — dense but scannable, with clear
+              hierarchy for decision-making.
+            </div>
+          </div>
+          <div class="chat-line user">
+            <div class="chat-avatar-circle">
+              <svg width="16" height="16" viewBox="0 0 16 16">
+                <circle cx="8" cy="8" r="5" fill="#4d4c48" />
+              </svg>
+            </div>
+            <div class="chat-bubble">
+              The data density looks good. Can we add a dark mode variant?
+            </div>
+          </div>
+          <div class="chat-line">
+            <div class="chat-avatar">
+              <svg width="16" height="16" viewBox="0 0 16 16">
+                <rect x="3" y="3" width="10" height="10" rx="2" fill="#faf9f5" />
+              </svg>
+            </div>
+            <div class="chat-bubble">
+              Done. Warm-toned dark surfaces, consistent with the palette. No cool blue-grays.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Capabilities -->
+    <section class="capabilities">
+      <div class="capabilities-inner">
+        <div class="capabilities-header">
+          <span class="overline">Capabilities</span>
+          <h2 class="section-heading" style="margin-top: 12px">What it can do</h2>
+        </div>
+        <div class="capabilities-list">
+          <div class="capability-item">
+            <div class="capability-icon">
+              <svg width="20" height="20" viewBox="0 0 20 20">
+                <polygon points="10,2 18,18 2,18" fill="#4d4c48" />
+              </svg>
+            </div>
+            <div class="capability-text">
+              <h3 class="sub-heading-sm">Component Design</h3>
+              <p class="body">
+                Buttons, cards, forms, navigation — all styled with the Claude design system tokens.
+              </p>
+            </div>
+          </div>
+          <div class="capability-item">
+            <div class="capability-icon">
+              <svg width="20" height="20" viewBox="0 0 20 20">
+                <circle cx="10" cy="10" r="8" fill="none" stroke="#4d4c48" stroke-width="1.5" />
+              </svg>
+            </div>
+            <div class="capability-text">
+              <h3 class="sub-heading-sm">Page Layouts</h3>
+              <p class="body">
+                Landing pages, dashboards, decks, and prototypes — all self-contained HTML
+                artifacts.
+              </p>
+            </div>
+          </div>
+          <div class="capability-item">
+            <div class="capability-icon">
+              <svg width="20" height="20" viewBox="0 0 20 20">
+                <rect
+                  x="3"
+                  y="3"
+                  width="14"
+                  height="14"
+                  rx="3"
+                  fill="none"
+                  stroke="#4d4c48"
+                  stroke-width="1.5"
+                />
+              </svg>
+            </div>
+            <div class="capability-text">
+              <h3 class="sub-heading-sm">Brand-Aligned Output</h3>
+              <p class="body">
+                Match any of 54 real design systems — Stripe, Linear, Vercel, or the Claude palette.
+              </p>
+            </div>
+          </div>
+          <div class="capability-item">
+            <div class="capability-icon">
+              <svg width="20" height="20" viewBox="0 0 20 20">
+                <polyline
+                  points="3,14 7,6 11,12 15,4 17,8"
+                  fill="none"
+                  stroke="#4d4c48"
+                  stroke-width="1.5"
+                />
+              </svg>
+            </div>
+            <div class="capability-text">
+              <h3 class="sub-heading-sm">Responsive by Default</h3>
+              <p class="body">
+                Every artifact scales from mobile to desktop with intentional breakpoints, not just
+                shrinking.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="cta-section">
+      <h2 class="section-heading">Ready to design better</h2>
+      <p class="body-large" style="max-width: 480px; margin: 0 auto 40px">
+        Start with a template. Iterate with context. Ship with confidence.
+      </p>
+      <a href="#" class="btn btn-brand">Get Started</a>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+      <div class="footer-inner">
+        <span class="overline">CocoMoon &middot; 2026</span>
+        <ul class="footer-links">
+          <li><a href="#">Documentation</a></li>
+          <li><a href="#">Templates</a></li>
+          <li><a href="#">About</a></li>
+        </ul>
+      </div>
+    </footer>
+  </body>
+</html>
