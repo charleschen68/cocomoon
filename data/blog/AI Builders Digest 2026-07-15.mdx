@@ -1,0 +1,60 @@
+---
+title: 'AI Builders Digest 2026-07-15'
+date: '2026-07-15'
+tags: ['AI Builders Digest']
+draft: false
+summary: 'AI Builders Digest'
+images: ['static/images/avatar_bak.png']
+---
+AI Builders Digest — July 15, 2026
+
+═══ X / TWITTER ═══
+
+▸ Bryan Catanzaro, Lead of Nemotron at NVIDIA — Open source AI is moving too fast to obsess over which models are "ahead." The real story isn't the gap between closed and open source; it's how rapidly the entire community progresses together. He argues that working in the open enables more innovation than any approach, pointing to open-source Chinese AI as proof — it's driven by genuine creativity, not just copycat distillation: https://x.com/bcatanza/status/2076526535585365394
+
+▸ Bryan Catanzaro — NVIDIA is building an external brain, not just bigger models. The Nemotron 3 Ultra became the top US open-weight model not by brute-forcing scale but through smarter architecture: MoE, multi-token prediction, multi-teacher distillation, and 4-bit training. As he puts it: "We build tools. We build external organs that help us solve problems... Now we're creating an external brain." https://x.com/bcatanza/status/2076526535585365394
+
+▸ Amjad Masad, Replit CEO — Replit shared a peek at their codebase and showed real-time model training progress. Combined with his observation that "early vibe coding" is evolving beyond apps into personal model creation, it signals a shift: model development is becoming as accessible as app building. https://x.com/amasad/status/2076776737074184661
+
+▸ Aaron Levie, Box CEO — Levie laid out his macro thesis on AI's future: frontier models keep pushing the ceiling upward while open weights absorb breakthroughs at lower cost; the applied AI layer (domain-specific orchestration) is still massively underserved; and while every enterprise will want its own model, training "one model per company" is much harder than it looks because sensitive data doesn't pack neatly into weights. His Fable experiment is a template: frontier intelligence as manager, cheaper models doing the heavy lifting, cost per task trending down even as total spend stays robust. https://x.com/levie/status/2076882332821373381
+
+▸ Guillermo Rauch, Vercel CEO — Feature flags are Vercel's most powerful building block. Open-weight models now drive 29% of gateway tokens (up from 11% in April), and Vercel is doubling down on observability and the filesystem API as their two winner features. https://x.com/rauchg/status/2076713720731042174
+
+▸ Sam Altman, OpenAI — OpenAI models are finally good at design, something Altman says "still breaks my brain." He also weighed in on Claude's quality-gating: the "hard questions are great but only if we deem you worthy." https://x.com/sama/status/2076823209589313910
+
+▸ Ryo Lu, Design at Cursor — Built a custom e-reader firmware with Cursor in a single weekend, complete with vertical CJK typography, line breaking, and cloud sync. His post on Jenny leading the design team (1,937 likes) shows strong team momentum at Cursor. https://x.com/ryolu_/status/2076713331113734641
+
+▸ Cat Wu & Thariq, both at Anthropic — Claude Code Artifacts got a major upgrade. Cat Wu shared the release; Thariq highlighted the ability to combine Artifacts creatively, including live dashboards editable between Cursor sessions and Claude Code. https://x.com/_catwu/status/2076867882894684314 https://x.com/trq212/status/2076790799011131735
+
+▸ Garry Tan, YC President — Declared the "Era of the Gentleman Scientist is so back" as AI tools empower builders to do deep research without needing PhD credentials. https://x.com/garrytan/status/2076587412516421945
+
+▸ Peter Steinberger — Moved his maintainer agent to the cloud and set up multi-agent collaboration. Also praised the "stress test" prompt pattern and shipped iOS/Android app updates. https://x.com/steipete/status/2076923300593422560
+
+▸ Nikunj Kothari, Partner at FPV Ventures — Built a Ramp-Autofill skill using Claude Code Fable, a tryramp CLI, and open-source tooling in the Claude ecosystem. https://x.com/nikunj/status/2076776777884811671
+
+▸ Zara Zhang — Shared the three levels of AI adoption for organizations (most companies sit at level 2) and promoted her conversation with AsheBytes on building in public and vibe coding. https://x.com/zarazhangrui/status/2076862290985730481
+
+▸ Aditya Agarwal, South PK Commons — Posted a humorous but pointed take on using an AGI-level coding agent to solve a real personal problem: finding out what necklaces Benson Boone wears for his daughter. https://x.com/adityaag/status/2076821102194721167
+
+═══════════════════════════════
+
+═══ OFFICIAL BLOGS ═══
+
+▸ Claude Blog — "Building intelligent apps for Apple platforms with Claude in the Foundation Models framework"
+Apple released a new Swift package letting developers use Claude through the Foundation Models framework. Three lines of code, typed Swift values via @Generable annotations, and Claude handles multi-step reasoning, code generation, and web search. Available on iOS 27, iPadOS 27, macOS 27, and visionOS 27. https://claude.com/blog/claude-for-foundation-models
+
+═══════════════════════════════
+
+═══ PODCASTS ═══
+
+▸ "Inside Nemotron & NVIDIA's AI Lab | Bryan Catanzaro" — The MAD Podcast with Matt Turck
+
+The Takeaway: Open-source AI's progress won't slow down just because closed labs limit their APIs. The entire field moves fast enough on its own.
+
+Bryan Catanzaro, who leads Nemotron (NVIDIA's open foundation models) and previously spent 2.5 years building Baidu's SILC with Andrew Ng and Dario Amjad, brings a rare global perspective. He started at NVIDIA in 2008 when GPU computing was still a fringe idea — ICML reviewers told him GPUs weren't "math enough." Ten years later, NVIDIA returned and he built DLSS.
+
+His core argument: open source AI isn't just distillation from closed models. The Chinese AI community, often dismissed as copying, is a net contributor, not a net taker. And he's not just nostalgic: he lived it, working with a young Dario Amjad at Baidu before returning to NVIDIA.\n\nOn open vs. closed: "We do our best work, we have the most impact, when we're able to each think about it in our own way and apply it in our own way. There's a lot of bright people on this planet. That's just not true [that only a few labs have monopolies on good ideas]."\n\nOn NVIDIA's approach: "NVIDIA is not afraid to put in five or ten years worth of research in order to change the world... working at a company that has that strength of conviction and the ability to follow through is kind of an ideal thing for me."\n\nOn the future of open AI: China has actually been leading the way in openness. "There's a chance for the rest of the world to catch up to China, in the sense that we can understand the benefits of working together as a community to build technologies for AI in a way that I think China has frankly been leading."\n\nOn Nemotron's technical edge: The model uses hybrid Mixture of Experts, multi-token prediction, multi-teacher distillation, and 4-bit training to push intelligence without brute-forcing compute. Nemotron 3 Ultra quickly became the #1 US open-weight model.\n\nListen: https://www.youtube.com/@DataDrivenNYC/videos
+
+═══════════════════════════════
+
+Generated through the Follow Builders skill: https://github.com/zarazhangrui/follow-builders
