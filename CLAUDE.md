@@ -20,7 +20,7 @@ This is a **Next.js 15 + React 19 blogging site** built on the Tailwind Nextjs S
 ## Architecture
 
 - **Root layout** (`app/layout.tsx`) sets up the font (Space Grotesk), theme providers, analytics, search provider (kbar), Header, and Footer.
-- **Content pipeline**: Contentlayer2 reads MDX from `data/blog/` and `data/authors/`, generating typed content objects (`contentlayer/generated`). The `contentlayer.config.ts` defines Blog and Authors document types with computed fields (readingTime, slug, path, toc, structuredData).
+- **Content pipeline**: Contentlayer2 reads MDX from `data/blog/` and `data/authors/`, generating typed content objects (`contentlayer/generated`). The `contentlayer.config.ts` defines Blog and Authors document types with computed fields (readingTime, slug, path, toc, structuredData). Its `onSuccess` hook also generates `app/tag-data.json` (tag counts) and the local search index — do not edit those files by hand.
 - **Pages**: `app/page.tsx` (home with blog listing), `app/blog/[...slug]/page.tsx` (dynamic blog posts), `app/tags/[tag]/page.tsx` (tag pages), `app/projects/page.tsx`, `app/about/page.tsx`.
 - **MDX rendering**: `components/MDXComponents.tsx` provides custom components (Image, CustomLink, TOCInline, Pre, TableWrapper, BlogNewsletterForm) passed to MDXContent.
 - **SEO**: `app/sitemap.ts` and `app/robots.ts` generate dynamically from siteMetadata.
@@ -31,21 +31,26 @@ This is a **Next.js 15 + React 19 blogging site** built on the Tailwind Nextjs S
 ## Development Commands
 
 ```bash
-npm install          # Install dependencies
-npm dev              # Start dev server (localhost:3000)
-npm build            # Production build + RSS feed generation
-npm start            # Start production server
-npm serve            # Same as start
-npm lint             # ESLint with auto-fix across app, components, layouts, scripts
-npm analyze          # Build with bundle analyzer (ANALYZE=true)
-npm pub              # Run publish script (scripts/pub.sh)
+npm install              # Install dependencies
+npm run dev              # Start dev server (localhost:3000); npm start does the same
+npm run build            # Production build + postbuild (RSS feed, search index)
+npm run serve            # Start production server
+npm run lint             # ESLint with auto-fix across app, components, layouts, scripts
+npm run analyze          # Build with bundle analyzer (ANALYZE=true)
+npm run pub "message"    # Publish: prettier --write ., git commit --no-verify, git push
 ```
+
+There is no test suite in this project.
+
+**Publishing**: `npm run pub "commit message"` (requires the message argument) formats the entire repo with Prettier, commits with `--no-verify`, and pushes; Vercel then auto-builds and deploys to cocomoon-tech.com.
+
+**Pre-commit hooks**: husky + lint-staged run ESLint (js/jsx/ts/tsx) and Prettier (plus json/css/md/mdx) on staged files for normal commits.
 
 For static export (GitHub Pages, S3, etc.):
 
 ```bash
-EXPORT=1 UNOPTIMIZED=1 npm build    # Static export without image optimization
-EXPORT=1 UNOPTIMIZED=1 BASE_PATH=/myblog npm build  # With base path
+EXPORT=1 UNOPTIMIZED=1 npm run build    # Static export without image optimization
+EXPORT=1 UNOPTIMIZED=1 BASE_PATH=/myblog npm run build  # With base path
 ```
 
 ## Code Style
