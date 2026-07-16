@@ -10,7 +10,7 @@ This is a **Next.js 15 + React 19 blogging site** built on the Tailwind Nextjs S
 
 - `app/` — Next.js App Router pages, layouts, and API routes (app layout, page, blog, tags, projects, about, api)
 - `components/` — Reusable React components (MDXComponents, Card, Header, Footer, Comments, etc.)
-- `data/` — Content sources: `blog/` (MDX posts), `authors/` (author MDX files), `siteMetadata.js`, `projectsData.ts`, `headerNavLinks.ts`, `references-data.bib`
+- `data/` — Content sources: `blog/` (MDX posts), `authors/` (author MDX files), `siteMetadata.js`, `projectsData.ts`, `servicesData.ts` (consulting services, shared by homepage cards and `/consulting`), `heroContent.ts` (homepage hero copy), `headerNavLinks.ts`, `references-data.bib`. Copy still marked `[PLACEHOLDER]` is scaffold text awaiting real content — replace it in these data files, not in page components.
 - `layouts/` — Page layout templates (PostLayout, PostSimple, PostBanner, ListLayoutWithTags, AuthorLayout)
 - `css/` — Tailwind stylesheet (`tailwind.css`) and Prism code highlighting (`prism.css`)
 - `scripts/` — Build scripts (`postbuild.mjs`, `rss.mjs`, `pub.sh`)
@@ -21,7 +21,7 @@ This is a **Next.js 15 + React 19 blogging site** built on the Tailwind Nextjs S
 
 - **Root layout** (`app/layout.tsx`) sets up the font (Space Grotesk), theme providers, analytics, search provider (kbar), Header, and Footer.
 - **Content pipeline**: Contentlayer2 reads MDX from `data/blog/` and `data/authors/`, generating typed content objects (`contentlayer/generated`). The `contentlayer.config.ts` defines Blog and Authors document types with computed fields (readingTime, slug, path, toc, structuredData). Its `onSuccess` hook also generates `app/tag-data.json` (tag counts) and the local search index — do not edit those files by hand.
-- **Pages**: `app/page.tsx` (home with blog listing), `app/blog/[...slug]/page.tsx` (dynamic blog posts), `app/tags/[tag]/page.tsx` (tag pages), `app/projects/page.tsx`, `app/about/page.tsx`.
+- **Pages**: `app/page.tsx` (home: hero, service cards, featured non-digest posts, AI Builders Digest strip — rendered by `app/Main.tsx`), `app/blog/[...slug]/page.tsx` (dynamic blog posts), `app/tags/[tag]/page.tsx` (tag pages), `app/projects/page.tsx`, `app/consulting/page.tsx` (services with anchor ids + mailto CTA), `app/about/page.tsx`.
 - **MDX rendering**: `components/MDXComponents.tsx` provides custom components (Image, CustomLink, TOCInline, Pre, TableWrapper, BlogNewsletterForm) passed to MDXContent.
 - **SEO**: `app/sitemap.ts` and `app/robots.ts` generate dynamically from siteMetadata.
 - **Search**: kbar command palette with local search index generated at build time.
