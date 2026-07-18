@@ -11,7 +11,7 @@ interface Project {
 
 const projectsData: Project[] = [
   {
-    title: '[PLACEHOLDER] Real-Time Analytics Platform',
+    title: 'Real-Time Computing',
     description: `[PLACEHOLDER] A streaming analytics platform processing millions of events per
     second. Replace with a real project: what it does, the scale it runs at, and your role.`,
     techStack: ['Kafka', 'Flink', 'ClickHouse'],
@@ -20,13 +20,13 @@ const projectsData: Project[] = [
     href: 'https://example.com',
   },
   {
-    title: '[PLACEHOLDER] Distributed Storage Engine',
+    title: 'Distributed Storage And Computing Engine',
     description: `[PLACEHOLDER] A horizontally scalable storage engine with strong consistency
     guarantees. Replace with a real project: what it does, the scale it runs at, and your role.`,
-    techStack: ['Rust', 'Raft', 'RocksDB'],
+    techStack: ['Java', 'Flink', 'Kafka', 'ClickHouse'],
     year: '2024',
     role: 'Core Contributor',
-    href: 'https://example.com',
+    href: 'https://github.com/charleschen68/big-data-platform',
   },
   {
     title: '[PLACEHOLDER] LLM Data Enrichment Pipeline',
