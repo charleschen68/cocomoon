@@ -6,10 +6,11 @@ draft: false
 summary: 'AI Builders Digest'
 images: ['static/images/avatar_bak.png']
 ---
+
 AI Builders Digest — July 12, 2026
 
 ═════════════════════════════════
-🐦  X / TWITTER
+🐦 X / TWITTER
 ═════════════════════════════════
 
 Box CEO Aaron Levie — AI was supposed to replace software jobs, but the opposite is happening. Software job postings are outpacing other fields because lowering the cost of production creates more demand, not less. Every unit of software becomes cheaper, so people want more of it. The jobs aren’t fully automated — you still need people to maintain code, decide what to build, run it long-term, and update it. The same will happen in other fields. Agents will cause more abundance than replacement.
@@ -46,7 +47,7 @@ Peter Yang — Argentina struggled against the world’s #64 and almost got elim
 https://x.com/petergyang/status/2076151105080447404
 
 ═════════════════════════════════
-🎙️  PODCAST
+🎙️ PODCAST
 ═════════════════════════════════
 
 No Priors: Glenn Fogel, CEO of Booking Holdings
