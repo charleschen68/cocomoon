@@ -22,10 +22,12 @@ QMD (Quick Markdown Search) combines both and introduces LLM-based final ranking
 Vector embedding is the "brain" of the knowledge base. QMD uses the [embeddinggemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF) model to convert text content of each document into high-dimensional vectors.
 
 **How it works:**
+
 - Document chunking (Chunking) → each text segment becomes a vector → stored in SQLite database
 - During query, the query text is also converted to a vector → cosine similarity is calculated with document vectors
 
 **Your actual data:**
+
 ```
 11 files → 24 vector embeddings
 SQLite database: 3.3 MB
@@ -42,10 +44,12 @@ Phase 2 (fine): LLM reads each candidate document → re-scores → outputs fina
 ```
 
 **Analogy:**
+
 - BM25/vector search is like "keyword search" — fast, but not deeply understanding semantics
 - Reranking is like "expert review" — reads each candidate document one by one, asking "is this really relevant to my question?"
 
 **In your knowledge base:**
+
 ```
 Reranking 11 chunks... (3.8s)
 qmd://jarvis-wiki/concepts/qmd.md:14  Score: 88%   ← fine ranking score
@@ -59,6 +63,7 @@ The final ranking uses the **RRF (Reciprocal Rank Fusion)** algorithm to merge B
 Query expansion is the "intelligent magnifying glass" of QMD. Using the [qmd-query-expansion-1.7B](https://huggingface.co/tobil/qmd-query-expansion-1.7B-gguf) model (community contribution), it automatically expands simple queries into multiple sub-queries.
 
 **Expansion process:**
+
 ```
 Original query: "what is reranking"
     ↓
@@ -71,6 +76,7 @@ Expanded to:
 ```
 
 **Three expansion types:**
+
 - **lex**：Keyword expansion, preserving keywords from the original query
 - **vec**：Vector expansion, semantically similar expressions
 - **hyde**：LLM-generated hypothetical answer documents
@@ -130,20 +136,20 @@ Outputs final ranked results
 
 ### Event-driven, not scheduled tasks
 
-| Scenario | Command | Description |
-|------|------|------|
-| After adding/modifying files | `qmd update` | Re-index the entire collection |
-| Refresh vectors only | `qmd embed` | Generate/refresh vector embeddings |
-| Daily search | `qmd query "your question"` | Automatic reranking |
-| Cleanup cache | `qmd cleanup` | Clear LLM cache, compress DB |
+| Scenario                     | Command                     | Description                        |
+| ---------------------------- | --------------------------- | ---------------------------------- |
+| After adding/modifying files | `qmd update`                | Re-index the entire collection     |
+| Refresh vectors only         | `qmd embed`                 | Generate/refresh vector embeddings |
+| Daily search                 | `qmd query "your question"` | Automatic reranking                |
+| Cleanup cache                | `qmd cleanup`               | Clear LLM cache, compress DB       |
 
 ### Memory usage
 
-| Operation | Loaded models | Actual RAM |
-|------|-----------|---------|
-| `qmd embed` | embedding only | ~400 MB |
-| `qmd query` | expansion + reranker | ~2.0 GB |
-| Full search | all three | ~2.7 GB |
+| Operation   | Loaded models        | Actual RAM |
+| ----------- | -------------------- | ---------- |
+| `qmd embed` | embedding only       | ~400 MB    |
+| `qmd query` | expansion + reranker | ~2.0 GB    |
+| Full search | all three            | ~2.7 GB    |
 
 ---
 
