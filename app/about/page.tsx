@@ -15,7 +15,7 @@ export default function Page() {
     return (
       <div className="mt-24 text-center">
         <h1 className="text-2xl font-bold">Author profile not found.</h1>
-        <p>Please check if data/authors/default.mdx exists.</p>
+        <p>Please check if data/authors/default.md exists.</p>
       </div>
     )
   }

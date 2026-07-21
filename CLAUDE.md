@@ -10,7 +10,7 @@ This is a **Next.js 15 + React 19 blogging site** built on the Tailwind Nextjs S
 
 - `app/` — Next.js App Router pages, layouts, and API routes (app layout, page, blog, tags, projects, about, api)
 - `components/` — Reusable React components (MDXComponents, Card, Header, Footer, Comments, etc.)
-- `data/` — Content sources: `blog/` (MDX posts), `authors/` (author MDX files), `siteMetadata.js`, `projectsData.ts`, `servicesData.ts` (consulting services, shared by homepage cards and `/consulting`), `heroContent.ts` (homepage hero copy), `headerNavLinks.ts`, `references-data.bib`. Copy still marked `[PLACEHOLDER]` is scaffold text awaiting real content — replace it in these data files, not in page components.
+- `data/` — Content sources: `blog/` (`.md` posts, processed through the MDX pipeline so JSX components still work), `authors/` (author `.md` files), `siteMetadata.js`, `projectsData.ts`, `servicesData.ts` (consulting services, shared by homepage cards and `/consulting`), `heroContent.ts` (homepage hero copy), `headerNavLinks.ts`, `references-data.bib`. Copy still marked `[PLACEHOLDER]` is scaffold text awaiting real content — replace it in these data files, not in page components.
 - `layouts/` — Page layout templates (PostLayout, PostSimple, PostBanner, ListLayoutWithTags, AuthorLayout)
 - `css/` — Tailwind stylesheet (`tailwind.css`) and Prism code highlighting (`prism.css`)
 - `scripts/` — Build scripts (`postbuild.mjs`, `rss.mjs`, `pub.sh`)
@@ -20,7 +20,7 @@ This is a **Next.js 15 + React 19 blogging site** built on the Tailwind Nextjs S
 ## Architecture
 
 - **Root layout** (`app/layout.tsx`) sets up the font (Space Grotesk), theme providers, analytics, search provider (kbar), Header, and Footer.
-- **Content pipeline**: Contentlayer2 reads MDX from `data/blog/` and `data/authors/`, generating typed content objects (`contentlayer/generated`). The `contentlayer.config.ts` defines Blog and Authors document types with computed fields (readingTime, slug, path, toc, structuredData). Its `onSuccess` hook also generates `app/tag-data.json` (tag counts) and the local search index — do not edit those files by hand.
+- **Content pipeline**: Contentlayer2 reads `.md` files from `data/blog/` and `data/authors/` (via `filePathPattern: '**/*.md'`) and processes them through the `contentType: 'mdx'` pipeline, so JSX components still work in these `.md` files. It generates typed content objects (`contentlayer/generated`). The `contentlayer.config.ts` defines Blog and Authors document types with computed fields (readingTime, slug, path, toc, structuredData). Its `onSuccess` hook also generates `app/tag-data.json` (tag counts) and the local search index — do not edit those files by hand.
 - **Pages**: `app/page.tsx` (home: hero, service cards, featured non-digest posts, AI Builders Digest strip — rendered by `app/Main.tsx`), `app/blog/[...slug]/page.tsx` (dynamic blog posts), `app/tags/[tag]/page.tsx` (tag pages), `app/projects/page.tsx`, `app/consulting/page.tsx` (services with anchor ids + mailto CTA), `app/about/page.tsx`.
 - **MDX rendering**: `components/MDXComponents.tsx` provides custom components (Image, CustomLink, TOCInline, Pre, TableWrapper, BlogNewsletterForm) passed to MDXContent.
 - **SEO**: `app/sitemap.ts` and `app/robots.ts` generate dynamically from siteMetadata.
@@ -59,13 +59,13 @@ EXPORT=1 UNOPTIMIZED=1 BASE_PATH=/myblog npm run build  # With base path
 - **Prettier**: no semicolons, single quotes, 100 char print width, 2-space indent, trailing commas, Tailwind plugin sorts classes.
 - **ESLint**: flat config, extends next/core-web-vitals, @typescript-eslint, jsx-a11y, prettier. `@typescript-eslint/no-unused-vars` and `react/prop-types` are off.
 - **Tailwind CSS 4**: uses `@tailwindcss/postcss` plugin. Styles in `css/tailwind.css`.
-- **MDX posts**: frontmatter follows Hugo's standard (title, date, tags, lastmod, draft, summary, images, authors, layout, canonicalUrl). Draft posts are filtered in production.
+- **Posts**: `.md` files (MDX-processed, so JSX components are allowed), frontmatter follows Hugo's standard (title, date, tags, lastmod, draft, summary, images, authors, layout, canonicalUrl). Draft posts are filtered in production.
 - **Import paths**: use `@/` aliases (e.g., `@/components/Header`, `@/data/siteMetadata`).
 
 ## Adding Content
 
-- **Blog posts**: Add MDX files to `data/blog/`. Frontmatter fields: `title`, `date`, `tags`, `lastmod`, `draft`, `summary`, `images`, `authors`, `layout`, `canonicalUrl`.
-- **Authors**: Add MDX files to `data/authors/`. File name maps to the `authors` field in post frontmatter.
+- **Blog posts**: Add `.md` files to `data/blog/`. Frontmatter fields: `title`, `date`, `tags`, `lastmod`, `draft`, `summary`, `images`, `authors`, `layout`, `canonicalUrl`.
+- **Authors**: Add `.md` files to `data/authors/`. File name maps to the `authors` field in post frontmatter.
 - **Site config**: Modify `data/siteMetadata.js` for site-wide settings (title, analytics, comments, search, newsletter).
 - **Navigation**: Modify `data/headerNavLinks.ts` to update nav links.
 - **Projects**: Modify `data/projectsData.ts` for the projects page.
