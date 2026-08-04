@@ -9,6 +9,7 @@
     "serve": "next start",
     "analyze": "ANALYZE=true next build",
     "pub": "bash scripts/pub.sh",
+    "docs:check": "node scripts/docs-check.mjs",
     "lint": "next lint --fix --dir pages --dir app --dir components --dir lib --dir layouts --dir scripts",
     "prepare": "husky"
   },
