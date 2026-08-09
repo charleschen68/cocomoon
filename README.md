@@ -2,6 +2,9 @@
 
 # Tailwind Nextjs Starter Blog
 
+> **Contributing or using a coding agent?** Start with the
+> [repository instructions](Instructions.md) before making changes.
+
 [![GitHub Repo stars](https://img.shields.io/github/stars/timlrx/tailwind-nextjs-starter-blog?style=social)](https://github.com/charleschen68/stargazers/)
 [![GitHub forks](https://img.shields.io/github/forks/timlrx/tailwind-nextjs-starter-blog?style=social)](https://github.com/charleschen68/forks)
 [![Twitter URL](https://img.shields.io/twitter/url?style=social&url=https%3A%2F%2Ftwitter.com%2Ftimlrxx)](https://x.com/timlrxx)
