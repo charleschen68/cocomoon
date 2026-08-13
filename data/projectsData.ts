@@ -29,13 +29,14 @@ const projectsData: Project[] = [
     href: 'https://github.com/charleschen68/big-data-platform',
   },
   {
-    title: '[PLACEHOLDER] LLM Data Enrichment Pipeline',
-    description: `[PLACEHOLDER] An AI-driven pipeline that classifies and enriches unstructured
-    data at scale. Replace with a real project: what it does, the scale it runs at, and your role.`,
-    techStack: ['Python', 'Claude API', 'Airflow'],
+    title: 'CoHelper',
+    description: `A floating knowledge assistant for Apple Silicon Macs that processes copied text,
+    runs local translation and QMD knowledge retrieval in parallel, and produces source-grounded
+    summaries.`,
+    techStack: ['Python', 'PyObjC', 'QMD', 'Ollama'],
     year: '2026',
     role: 'Designer & Builder',
-    href: 'https://example.com',
+    href: 'https://github.com/charleschen68/CoHelper',
   },
 ]
 
