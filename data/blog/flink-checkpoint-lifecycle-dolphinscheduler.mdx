@@ -1,5 +1,5 @@
 ---
-title: 'Flink Checkpoint 生命周期管理：从 HDFS 清理到 DolphinScheduler 资源一致性'
+title: 'Flink Checkpoint 生命周期管理'
 date: '2026-08-27'
 tags: ['Flink', 'Checkpoint', 'DolphinScheduler', 'HDFS', '运维']
 draft: false
@@ -330,3 +330,311 @@ protected_until
 - [Apache Hadoop：core-default.xml](https://hadoop.apache.org/docs/stable/hadoop-project-dist/hadoop-common/core-default.html)
 - [Apache DolphinScheduler：资源中心同步讨论](https://github.com/apache/dolphinscheduler/discussions/9723)
 - [Apache DolphinScheduler：配置文档](https://github.com/apache/dolphinscheduler/blob/dev/docs/docs/en/architecture/configuration.md)
+
+```python
+
+#!/usr/bin/env python3
+"""Safely plan or execute cleanup of old Flink checkpoint job-run directories.
+
+This file intentionally supports Python 3.6 because older Hadoop and
+DolphinScheduler worker nodes often expose that interpreter as /bin/python3.
+"""
+
+import argparse
+import posixpath
+import shlex
+import subprocess
+import sys
+import time
+from datetime import datetime
+from typing import Callable, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple
+from urllib.parse import urlsplit
+
+
+class HdfsEntry(NamedTuple):
+    path: str
+    modified_at: float
+    is_dir: bool
+
+
+class JobPlan(NamedTuple):
+    job_path: str
+    keep: Optional[HdfsEntry]
+    delete: Tuple[HdfsEntry, ...]
+    protected: Tuple[HdfsEntry, ...]
+    too_young: Tuple[HdfsEntry, ...]
+
+
+Runner = Callable[[Sequence[str]], subprocess.CompletedProcess]
+
+
+def default_runner(command: Sequence[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        command,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+
+
+def uri_path(value: str) -> str:
+    return urlsplit(value).path.rstrip("/") or "/"
+
+
+def basename(value: str) -> str:
+    return posixpath.basename(uri_path(value))
+
+
+def validate_root(root: str) -> str:
+    normalized = root.rstrip("/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"hdfs", "viewfs"}:
+        raise ValueError("root must use an hdfs:// or viewfs:// URI")
+    if any(character in normalized for character in ("*", "?", "[", "]", "\n", "\r")):
+        raise ValueError("root must not contain glob patterns or control characters")
+    components = [component for component in parsed.path.split("/") if component]
+    if len(components) < 2:
+        raise ValueError("root is too broad; use a path such as hdfs:///flink/checkpoints")
+    return normalized
+
+
+def parse_hdfs_ls(output: str) -> List[HdfsEntry]:
+    entries: List[HdfsEntry] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("Found "):
+            continue
+        fields = line.split(maxsplit=7)
+        if len(fields) != 8 or fields[0][0] not in {"d", "-", "l"}:
+            raise ValueError(f"unexpected 'hdfs dfs -ls' output: {raw_line!r}")
+        try:
+            modified_at = datetime.strptime(
+                f"{fields[5]} {fields[6]}", "%Y-%m-%d %H:%M"
+            ).timestamp()
+        except ValueError as error:
+            raise ValueError(f"invalid HDFS timestamp: {raw_line!r}") from error
+        entries.append(
+            HdfsEntry(
+                path=fields[7],
+                modified_at=modified_at,
+                is_dir=fields[0].startswith("d"),
+            )
+        )
+    return entries
+
+
+def is_direct_child(parent: str, child: str) -> bool:
+    return posixpath.dirname(uri_path(child)) == uri_path(parent)
+
+
+class HdfsClient:
+    def __init__(self, command: Sequence[str], runner: Runner = default_runner) -> None:
+        if not command:
+            raise ValueError("HDFS command cannot be empty")
+        self.command = tuple(command)
+        self.runner = runner
+
+    def _run(self, *arguments: str) -> subprocess.CompletedProcess:
+        command = [*self.command, "dfs", *arguments]
+        result = self.runner(command)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or "unknown HDFS error"
+            rendered_command = " ".join(shlex.quote(part) for part in command)
+            raise RuntimeError(f"command failed ({rendered_command}): {detail}")
+        return result
+
+    def list_directories(self, parent: str) -> List[HdfsEntry]:
+        # HDFS sorts with its full timestamp precision. Its rendered timestamp only has
+        # minute precision, so preserving this order avoids an incorrect local tie-break.
+        entries = parse_hdfs_ls(self._run("-ls", "-t", parent).stdout)
+        return [entry for entry in entries if entry.is_dir and is_direct_child(parent, entry.path)]
+
+    def list_recursive(self, path: str) -> List[str]:
+        return [line for line in self._run("-ls", "-R", path).stdout.splitlines() if line]
+
+    def delete_directory(self, path: str) -> None:
+        # Intentionally omit -skipTrash so HDFS Trash remains a recovery layer.
+        self._run("-rm", "-r", path)
+
+
+def plan_job(
+    job: HdfsEntry,
+    generations: Iterable[HdfsEntry],
+    *,
+    protected_paths: Set[str],
+    min_age_seconds: float,
+    now: float,
+) -> JobPlan:
+    # Sorting is stable: when rendered timestamps tie, retain the HDFS `-ls -t` order.
+    ordered = sorted(generations, key=lambda entry: entry.modified_at, reverse=True)
+    if not ordered:
+        return JobPlan(job.path, None, (), (), ())
+
+    keep = ordered[0]
+    delete: List[HdfsEntry] = []
+    protected: List[HdfsEntry] = []
+    too_young: List[HdfsEntry] = []
+    job_name = basename(job.path)
+
+    for entry in ordered[1:]:
+        relative_name = f"{job_name}/{basename(entry.path)}"
+        if entry.path in protected_paths or relative_name in protected_paths:
+            protected.append(entry)
+        elif now - entry.modified_at < min_age_seconds:
+            too_young.append(entry)
+        else:
+            delete.append(entry)
+
+    return JobPlan(
+        job_path=job.path,
+        keep=keep,
+        delete=tuple(delete),
+        protected=tuple(protected),
+        too_young=tuple(too_young),
+    )
+
+
+def format_time(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp).astimezone().isoformat(timespec="minutes")
+
+
+def print_contents(client: HdfsClient, target: HdfsEntry, max_lines: int) -> None:
+    lines = client.list_recursive(target.path)
+    shown = lines if max_lines == 0 else lines[:max_lines]
+    for line in shown:
+        print(f"    {line}")
+    if len(shown) < len(lines):
+        print(f"    ... omitted {len(lines) - len(shown)} entries")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Keep the newest child directory under each Flink application directory and "
+            "plan cleanup of older job-run directories. The default is dry-run."
+        )
+    )
+    parser.add_argument(
+        "--root",
+        default="hdfs:///flink/checkpoints",
+        help="checkpoint application root (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--hdfs-command",
+        default="hdfs",
+        help="HDFS executable, optionally with fixed arguments (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--job",
+        action="append",
+        default=[],
+        help="only process this application directory name; repeat to select multiple jobs",
+    )
+    parser.add_argument(
+        "--protect",
+        action="append",
+        default=[],
+        metavar="JOB/CHILD_OR_FULL_URI",
+        help="protect an old child directory even when eligible; repeat as needed",
+    )
+    parser.add_argument(
+        "--min-age-hours",
+        type=float,
+        default=24.0,
+        help="never delete an old directory younger than this (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--max-list-lines",
+        type=int,
+        default=0,
+        help="cap recursive content lines per deletion candidate; 0 prints all (default)",
+    )
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="perform deletion; without this flag the command only prints the plan",
+    )
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None, *, runner: Runner = default_runner) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        root = validate_root(args.root)
+        if args.min_age_hours < 0:
+            raise ValueError("--min-age-hours cannot be negative")
+        if args.max_list_lines < 0:
+            raise ValueError("--max-list-lines cannot be negative")
+
+        client = HdfsClient(shlex.split(args.hdfs_command), runner=runner)
+        selected_jobs = set(args.job)
+        jobs = client.list_directories(root)
+        if selected_jobs:
+            discovered = {basename(job.path) for job in jobs}
+            missing = selected_jobs - discovered
+            if missing:
+                raise RuntimeError(f"requested job directories were not found: {sorted(missing)}")
+            jobs = [job for job in jobs if basename(job.path) in selected_jobs]
+
+        now = time.time()
+        protected_paths = set(args.protect)
+        matched_protected_paths: Set[str] = set()
+        plans: List[JobPlan] = []
+        for job in sorted(jobs, key=lambda entry: entry.path):
+            generations = client.list_directories(job.path)
+            job_name = basename(job.path)
+            for generation in generations:
+                relative_name = f"{job_name}/{basename(generation.path)}"
+                if generation.path in protected_paths:
+                    matched_protected_paths.add(generation.path)
+                if relative_name in protected_paths:
+                    matched_protected_paths.add(relative_name)
+            plans.append(
+                plan_job(
+                    job,
+                    generations,
+                    protected_paths=protected_paths,
+                    min_age_seconds=args.min_age_hours * 3600,
+                    now=now,
+                )
+            )
+
+        unmatched_protected_paths = protected_paths - matched_protected_paths
+        if unmatched_protected_paths:
+            raise RuntimeError(
+                "protected directories were not found in the selected inventory: "
+                f"{sorted(unmatched_protected_paths)}"
+            )
+
+        print(f"MODE={'EXECUTE' if args.execute else 'DRY-RUN'} root={root}")
+        action_count = 0
+        for plan in plans:
+            print(f"JOB {plan.job_path}")
+            if plan.keep is None:
+                print("  SKIP no child directories")
+                continue
+            print(f"  KEEP {plan.keep.path} modified={format_time(plan.keep.modified_at)}")
+            for entry in plan.protected:
+                print(f"  PROTECT {entry.path} modified={format_time(entry.modified_at)}")
+            for entry in plan.too_young:
+                print(f"  SKIP-YOUNG {entry.path} modified={format_time(entry.modified_at)}")
+            for entry in plan.delete:
+                action_count += 1
+                print(f"  {'DELETE' if args.execute else 'WOULD-DELETE'} {entry.path}")
+                print_contents(client, entry, args.max_list_lines)
+                if args.execute:
+                    sys.stdout.flush()
+                    client.delete_directory(entry.path)
+
+        print(f"SUMMARY mode={'execute' if args.execute else 'dry-run'} candidates={action_count}")
+        return 0
+    except (RuntimeError, ValueError) as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+```
