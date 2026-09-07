@@ -8,7 +8,6 @@ import { formatDate } from 'pliny/utils/formatDate'
 import NewsletterForm from 'pliny/ui/NewsletterForm'
 
 const MAX_FEATURED = 3
-const MAX_DIGEST = 5
 
 function isDigest(post: { title: string; slug: string }) {
   return (
@@ -19,7 +18,6 @@ function isDigest(post: { title: string; slug: string }) {
 
 export default function Home({ posts }) {
   const featured = posts.filter((post) => !isDigest(post)).slice(0, MAX_FEATURED)
-  const digests = posts.filter((post) => isDigest(post)).slice(0, MAX_DIGEST)
 
   return (
     <div className="divide-y divide-gray-200 dark:divide-gray-700">
@@ -120,42 +118,6 @@ export default function Home({ posts }) {
               aria-label="All posts"
             >
               All posts &rarr;
-            </Link>
-          </div>
-        </div>
-      )}
-
-      {/* Daily digest */}
-      {digests.length > 0 && (
-        <div className="py-12">
-          <h2 className="mb-6 text-2xl leading-8 font-bold tracking-tight text-gray-900 dark:text-gray-100">
-            AI Builders Digest
-          </h2>
-          <ul className="space-y-3">
-            {digests.map((post) => (
-              <li key={post.slug} className="flex flex-wrap items-baseline gap-x-4">
-                <time
-                  dateTime={post.date}
-                  className="text-sm text-gray-500 tabular-nums dark:text-gray-400"
-                >
-                  {formatDate(post.date, siteMetadata.locale)}
-                </time>
-                <Link
-                  href={`/blog/${post.slug}`}
-                  className="hover:text-primary-500 dark:hover:text-primary-400 font-medium text-gray-900 dark:text-gray-100"
-                >
-                  {post.title}
-                </Link>
-              </li>
-            ))}
-          </ul>
-          <div className="mt-6 text-base leading-6 font-medium">
-            <Link
-              href="/tags/ai-builders-digest"
-              className="text-primary-500 hover:text-primary-600 dark:hover:text-primary-400"
-              aria-label="All digests"
-            >
-              All digests &rarr;
             </Link>
           </div>
         </div>

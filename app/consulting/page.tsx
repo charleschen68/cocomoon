@@ -6,7 +6,7 @@ import { genPageMetadata } from 'app/seo'
 export const metadata = genPageMetadata({
   title: 'Consulting',
   description:
-    'Consulting in high-performance distributed systems, real-time data infrastructure, and AI-driven data processing.',
+    'Engineering support for distributed systems, real-time risk-processing pipelines, and AI-driven data workflows.',
 })
 
 export default function Consulting() {
@@ -17,8 +17,8 @@ export default function Consulting() {
           Consulting
         </h1>
         <p className="text-lg leading-7 text-gray-500 dark:text-gray-400">
-          [PLACEHOLDER] I help teams build and operate systems that are fast, correct, and reliable
-          at scale.
+          Engineering support for data pipelines, deployment workflows, and local AI integration,
+          grounded in my work on big-data-platform, its GitOps environment, and CoHelper.
         </p>
       </div>
       <div className="divide-y divide-gray-200 py-6 dark:divide-gray-700">
@@ -57,7 +57,8 @@ export default function Consulting() {
           Work with me
         </h2>
         <p className="mt-4 text-gray-500 dark:text-gray-400">
-          [PLACEHOLDER] Have a project in mind or want a second opinion on your architecture?
+          Share your data flow, operational constraints, and the problem you want to solve. We can
+          define a focused architecture review or implementation scope.
         </p>
         <Link
           href={`mailto:${siteMetadata.email}`}

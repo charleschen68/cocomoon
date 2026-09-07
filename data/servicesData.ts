@@ -9,44 +9,44 @@ export interface Service {
 const servicesData: Service[] = [
   {
     id: 'distributed-systems',
-    name: 'High-Performance Distributed Systems',
+    name: 'Distributed Systems Engineering',
     blurb:
-      '[PLACEHOLDER] Architecture and tuning for systems that stay fast and correct under real-world load.',
+      'State, recovery, and observability for data systems, supported by hands-on GitOps platform work.',
     description:
-      '[PLACEHOLDER] I help teams design, review, and optimize distributed systems — from consensus and replication strategy to tail-latency hunting in production. Replace this paragraph with your real positioning and 1-2 proof points.',
+      'My distributed-systems work connects application behavior with deployment and operations. In big-data-platform and big-data-platform-envs, I separate processing code from environment configuration and work with event streams, stateful services, encrypted secrets, and monitoring. My focus is understanding what happens when messages repeat, dependencies fail, or a service restarts.',
     capabilities: [
-      '[PLACEHOLDER] Architecture design and review',
-      '[PLACEHOLDER] Performance profiling and tail-latency reduction',
-      '[PLACEHOLDER] Scalability and capacity planning',
-      '[PLACEHOLDER] Reliability engineering and failure-mode analysis',
+      'Architecture review focused on state ownership, failure modes, and recovery boundaries',
+      'Kubernetes environment configuration with Argo CD, Kustomize, and SOPS',
+      'Collector health and freshness monitoring with Prometheus and Grafana',
+      'Reproducible deployment procedures and explicit validation criteria',
     ],
   },
   {
     id: 'realtime-data',
-    name: 'Real-Time Data Infrastructure',
+    name: 'Real-Time Data Processing & Risk Control',
     blurb:
-      '[PLACEHOLDER] Streaming pipelines and storage layers built for low latency and high throughput.',
+      'Kafka and Flink pipelines, with real-time risk control as a focus for further development.',
     description:
-      '[PLACEHOLDER] I build and operate real-time data platforms — event streaming, stream processing, and the serving layers on top. Replace this paragraph with your real positioning and 1-2 proof points.',
+      'big-data-platform is my development environment for event ingestion, stream processing, and asynchronous model calls. Its risk-control embedding job connects Kafka, Flink, Ollama, and Milvus. I am extending this foundation toward risk-processing workflows where latency, feature freshness, duplicate and out-of-order events, and decision replay have explicit acceptance criteria.',
     capabilities: [
-      '[PLACEHOLDER] Streaming pipeline design (Kafka, Flink, etc.)',
-      '[PLACEHOLDER] Real-time analytics and serving layers',
-      '[PLACEHOLDER] Exactly-once processing and data correctness',
-      '[PLACEHOLDER] Cost and throughput optimization',
+      'Event ingestion and stream-processing pipelines with Python, Kafka, and Flink',
+      'Asynchronous embedding generation and vector storage integration',
+      'Checkpoint, replay, and source-to-sink consistency analysis',
+      'Latency, data freshness, and failure-recovery criteria for risk-processing designs',
     ],
   },
   {
     id: 'ai-data-processing',
     name: 'AI-Driven Data Processing',
     blurb:
-      '[PLACEHOLDER] Data platforms and pipelines that put LLMs and ML to work on production data.',
+      'Local knowledge retrieval, model-assisted understanding, and controlled actions through CoHelper.',
     description:
-      '[PLACEHOLDER] I design data processing systems that integrate AI — LLM-powered enrichment, embedding pipelines, and the infrastructure to run them reliably at scale. Replace this paragraph with your real positioning and 1-2 proof points.',
+      'With CoHelper / AI Drive, I connect local knowledge retrieval to translation, source-grounded answers, and guarded desktop actions. This work supports my longer-term Agent Infrastructure direction: reusable tools with explicit inputs, permissions, cancellation, and side-effect boundaries. The emphasis is on traceable results and human control throughout the processing workflow.',
     capabilities: [
-      '[PLACEHOLDER] LLM-powered data enrichment pipelines',
-      '[PLACEHOLDER] Embedding and vector search infrastructure',
-      '[PLACEHOLDER] Evaluation and quality monitoring for AI pipelines',
-      '[PLACEHOLDER] Batch-to-real-time AI inference architecture',
+      'QMD retrieval and local Ollama integration for knowledge workflows',
+      'Independent translation, search, and answer-generation stages',
+      'Typed capability interfaces and cancellation of superseded tasks',
+      'Explicit confirmation and target validation for desktop actions',
     ],
   },
 ]
@@ -55,17 +55,17 @@ export const howIWork = [
   {
     step: 'Scope',
     detail:
-      '[PLACEHOLDER] A short call to understand your system, constraints, and what success looks like.',
+      'Map the data flow, state ownership, and operational constraints. Agree on correctness, latency, freshness, and recovery criteria before choosing an implementation.',
   },
   {
-    step: 'Engage',
+    step: 'Build & Validate',
     detail:
-      '[PLACEHOLDER] Focused engagement — architecture review, hands-on build, or embedded advisory.',
+      'Work through a focused design or implementation, then check the relevant failure cases: duplicate events, timeouts, restarts, and unavailable dependencies.',
   },
   {
     step: 'Deliver',
     detail:
-      '[PLACEHOLDER] Concrete deliverables: designs, working code, runbooks, and a clear handoff.',
+      'Provide code or configuration, design decisions, validation evidence, and operating notes. Make remaining limitations and recovery procedures explicit.',
   },
 ]
 

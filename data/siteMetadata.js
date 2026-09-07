@@ -4,7 +4,7 @@ const siteMetadata = {
   author: 'Charles Chen',
   headerTitle: 'Coco Moon',
   description:
-    'Providing specialized software development and technical consulting services, focusing on high-performance distributed systems, real-time data infrastructure, and AI-driven data processing solutions for global clients.',
+    'Charles Chen’s projects and writing on distributed systems engineering, real-time risk processing, and AI-driven data processing, spanning Kafka and Flink pipelines, GitOps environments, and local Agent Infrastructure.',
   language: 'en-us',
   theme: 'system', // system, dark or light
   siteUrl: 'http://www.cocomoon-tech.com/',

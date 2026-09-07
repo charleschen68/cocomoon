@@ -13,8 +13,9 @@ export default function Projects() {
             Projects
           </h1>
           <p className="text-lg leading-7 text-gray-500 dark:text-gray-400">
-            [PLACEHOLDER] Selected work in distributed systems, real-time data, and AI
-            infrastructure.
+            Three connected projects exploring distributed systems, real-time risk processing, and
+            AI-driven data processing: application pipelines, GitOps environments, and a local AI
+            assistant.
           </p>
         </div>
         <div className="container py-12">

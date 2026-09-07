@@ -11,31 +11,24 @@ interface Project {
 
 const projectsData: Project[] = [
   {
-    title: 'Real-Time Computing',
-    description: `[PLACEHOLDER] A streaming analytics platform processing millions of events per
-    second. Replace with a real project: what it does, the scale it runs at, and your role.`,
-    techStack: ['Kafka', 'Flink', 'ClickHouse'],
-    year: '2025',
-    role: 'Architect & Lead Engineer',
-    href: 'https://example.com',
-  },
-  {
-    title: 'Distributed Storage And Computing Engine',
-    description: `[PLACEHOLDER] A horizontally scalable storage engine with strong consistency
-    guarantees. Replace with a real project: what it does, the scale it runs at, and your role.`,
-    techStack: ['Java', 'Flink', 'Kafka', 'ClickHouse'],
-    year: '2024',
-    role: 'Core Contributor',
+    title: 'big-data-platform',
+    description:
+      'A local development platform for event collection, Flink stream processing, and AI enrichment. It combines Python collectors with Kafka and Java jobs, including a risk-control embedding pipeline that calls Ollama asynchronously and writes vectors to Milvus. I use it to explore real-time risk processing, state recovery, and the correctness boundaries between sources, processing, and sinks.',
+    techStack: ['Java', 'Python', 'Kafka', 'Flink', 'Ollama', 'Milvus'],
     href: 'https://github.com/charleschen68/big-data-platform',
   },
   {
-    title: 'CoHelper',
-    description: `A floating knowledge assistant for Apple Silicon Macs that processes copied text,
-    runs local translation and QMD knowledge retrieval in parallel, and produces source-grounded
-    summaries.`,
-    techStack: ['Python', 'PyObjC', 'QMD', 'Ollama'],
-    year: '2026',
-    role: 'Designer & Builder',
+    title: 'big-data-platform-envs',
+    description:
+      'The GitOps environment repository for big-data-platform. It separates application code and image builds from Kubernetes deployment configuration, using Argo CD and Kustomize to declare the local OrbStack environment. SOPS manages encrypted secrets, while Prometheus and Grafana provide visibility into collector health and data freshness. This is my platform-engineering foundation for repeatable deployment and operational review.',
+    techStack: ['Kubernetes', 'Argo CD', 'Kustomize', 'SOPS', 'Prometheus', 'Grafana'],
+    href: 'https://github.com/charleschen68/big-data-platform-envs',
+  },
+  {
+    title: 'CoHelper / AI Drive',
+    description:
+      'A personal AI assistant for Apple Silicon Macs, combining clipboard translation, QMD knowledge retrieval, and answers grounded in local sources through Ollama. Its reusable AI Drive components also support screen analysis and guarded desktop actions with explicit confirmation and target validation. I use CoHelper to develop AI-driven data understanding and Agent Infrastructure around typed capabilities, cancellation, and controlled side effects.',
+    techStack: ['Python', 'PyObjC', 'QMD', 'Ollama', 'macOS Accessibility'],
     href: 'https://github.com/charleschen68/CoHelper',
   },
 ]
