@@ -1,0 +1,455 @@
+---
+title: 'Flink Checkpoint HDFS 自动清理实践：从误删风险到安全灰度上线'
+date: '2026-09-07'
+tags: ['Flink', 'Checkpoint', 'DolphinScheduler', 'HDFS', '运维']
+draft: false
+summary: '在此前 Checkpoint lifecycle 方案上，补齐嵌套 Root 防误删、严格排除校验、HDFS HA、调度环境和 NameNode 压力控制，梳理从 Dry Run 到受控删除的灰度流程。'
+images: ['static/images/avatar_bak.png']
+---
+
+**这是之前 [《Flink Checkpoint 生命周期管理》](/blog/flink-checkpoint-lifecycle-dolphinscheduler)（ckpt lifecycle）博客的优化篇。** 上一篇介绍了历史运行目录为什么会累积，以及如何通过 Python 和 DolphinScheduler 管理它们；这一篇继续记录方案落地时遇到的目录误判、HA 访问、调度启动和元数据扫描问题。
+
+在长时间运行的 Flink 集群中，作业取消后重新发布、创建新的运行实例，可能留下多个历史 Checkpoint 目录。它们既占用存储，也增加 NameNode 的元数据负担。并非每次故障重启都会产生新的运行目录，实际情况取决于部署方式和 Checkpoint 路径配置。
+
+最初的需求很简单：每个逻辑 Job 保留最新的一份运行目录，其余历史目录超过指定时间后清理。但真正落地后，一个目录层级判断错误，就可能把整个 Job 的 Checkpoint 根目录当成历史批次删除。
+
+本文记录提供的实践过程和增强设计，不附新版 Python 完整实现。**上一篇附录中的旧脚本不支持这里新增的 `--exclude-job`，也未实现本文全部安全检查；不能直接把新参数套到旧脚本上。** `--list-contents` 是后文提出的进一步优化接口。上线前应核对实际部署版本及其行为。
+
+## 一、清理目标与适用前提
+
+假设目录结构固定为：
+
+```text
+hdfs:///flink/checkpoints/dws/
+├── flink-job-a/
+│   ├── run-001/
+│   ├── run-002/
+│   └── run-003/
+└── flink-job-b/
+    ├── run-001/
+    └── run-002/
+```
+
+其中 `ROOT → JOB → GENERATION` 是本方案的部署约定，不是所有 Flink 集群天然遵循的目录规范。目标是在每个 Job 下保留按修改时间排序的最新目录：
+
+```text
+flink-job-a/
+├── run-003/    KEEP
+├── run-002/    达到年龄阈值后，成为删除候选
+└── run-001/    达到年龄阈值后，成为删除候选
+```
+
+例如设置 `--min-age-hours 144`，表示候选目录的修改时间距离扫描时刻至少 144 小时，也就是 6 天。
+
+这里必须区分三个概念：**目录修改时间、运行实例启动时间、最近一次成功 Checkpoint 时间并不等价。** 深层文件发生变化，不意味着祖先目录的修改时间一定随之更新。因此年龄阈值只能作为候选过滤条件，不能证明目录已经停止使用。
+
+真正删除前，还必须确认旧实例已经退出，目录不被当前作业、恢复任务或发布回滚流程引用。最新目录也不一定包含可恢复的成功 Checkpoint，不能仅因为出现了新目录，就删除唯一可用的旧恢复点。Flink 增量 Checkpoint 可能共享状态文件，清理前必须考虑快照所有权和恢复依赖。[Flink 官方说明](https://flink.apache.org/2022/05/06/improvements-to-flink-operations-snapshots-ownership-and-savepoint-formats/)
+
+## 二、基本逻辑：默认只生成计划
+
+脚本按如下流程处理：
+
+```text
+扫描 ROOT
+  ↓
+找到一级 JOB 目录
+  ↓
+扫描 JOB 下的运行目录
+  ↓
+按修改时间排序，最新目录 KEEP
+  ↓
+历史目录检查年龄、保护规则和恢复依赖
+  ↓
+生成删除候选
+```
+
+核心规则可以概括为：
+
+```python
+ordered[0]   # KEEP
+ordered[1:] # 历史目录，仍需经过安全检查
+```
+
+修改时间相同不能证明哪个实例更新。如果排序结果影响恢复点保留，应依赖运行记录消除歧义；无法确认时保留这些目录或停止执行。
+
+默认只输出：
+
+```text
+WOULD-DELETE ...
+```
+
+只有显式传入 `--execute`，才调用：
+
+```bash
+hdfs dfs -rm -r "<generation-path>"
+```
+
+删除命令不使用 `-skipTrash`。但“不跳过 Trash”不等于“必然可恢复”：必须确认实际执行用户和集群的 Trash 配置有效，验证恢复操作，并了解保留期限。进入 Trash 的数据通常仍占用空间，不会立即释放容量。[Hadoop FileSystem Shell](https://hadoop.apache.org/docs/r3.4.0/hadoop-project-dist/hadoop-common/FileSystemShell.html)
+
+## 三、最大的风险：Checkpoint Root 存在嵌套
+
+实际目录可能是：
+
+```text
+hdfs:///flink/checkpoints/dws/
+├── flink-job-a/
+├── flink-job-b/
+└── dgraph/
+    ├── flink-job-c/
+    └── flink-job-d/
+```
+
+`dgraph/` 本身也是一个 Checkpoint Root，需要单独治理。如果父任务直接扫描 `dws/`，只理解两层结构的脚本会把 `dgraph` 当作普通 Job，再把 `flink-job-c` 和 `flink-job-d` 当作两个 generation。
+
+于是可能生成这样的错误计划：
+
+```text
+KEEP         dws/dgraph/flink-job-d
+WOULD-DELETE dws/dgraph/flink-job-c
+```
+
+一旦开启执行，删除的就是整个 Job 的 Checkpoint 根目录，而不是一个旧运行批次。
+
+## 四、用 --exclude-job 隔离父子 Root
+
+父 Root 必须明确排除嵌套 Root：
+
+```bash
+/bin/python3 flink_checkpoint_lifecycle.py \
+  --root hdfs:///flink/checkpoints/dws/ \
+  --exclude-job dgraph
+```
+
+子 Root 单独处理：
+
+```bash
+/bin/python3 flink_checkpoint_lifecycle.py \
+  --root hdfs:///flink/checkpoints/dws/dgraph/
+```
+
+这样职责就清楚了：父任务只处理 `flink-job-a`、`flink-job-b`，不进入 `dgraph`；子任务专门处理 `dgraph` 下的 Job。
+
+多个排除项可以重复传入：
+
+```bash
+--exclude-job testone \
+--exclude-job testone2 \
+--exclude-job dgraph
+```
+
+排除项按一级目录名精确匹配。`--exclude-job test` 不会自动排除 `testone` 或 `testtwo`，避免模糊匹配扩大范围。
+
+## 五、排除目录写错时必须失败
+
+对于删除任务，采用 Fail Closed：关键安全信息不完整或不一致时，停止执行。
+
+例如把 `dgraph` 写成 `dgrahp`，不能静默忽略，否则操作人员会误以为保护已经生效。安全版应报错并返回非零状态码：
+
+```text
+ERROR: excluded job directories were not found: ['dgrahp']
+```
+
+校验必须针对本次实际扫描到的目录，且在任何删除之前完成。保护路径拼错、选定 Job 不存在，也应遵循相同规则。
+
+## 六、自动检测疑似嵌套 Root，先扫描再删除
+
+仅依赖人工配置仍可能遗漏。正常运行目录可能呈现如下结构：
+
+```text
+ROOT
+└── JOB
+    └── RUN
+        ├── chk-123
+        ├── shared
+        └── taskowned
+```
+
+如果扫描看到的是：
+
+```text
+ROOT
+└── dgraph
+    └── JOB
+        └── RUN
+            └── chk-123
+```
+
+说明 `dgraph` 很可能是另一个 Root。检测到这种异常后，应停止整个 Root 的扫描，不执行删除。
+
+不过，目录特征只能用于发现疑点，不能作为安全证明。空目录、尚未完成 Checkpoint 的实例，以及不同版本或存储布局，都可能缺少这些特征。明确的 Root 清单和层级约定仍是基础；探测应限制深度和调用规模，无法确认的结构停止处理。
+
+整个过程分成四个阶段：
+
+```text
+Inventory：扫描全部待处理目录
+    ↓
+Validate：校验排除项、保护项、层级和目录边界
+    ↓
+Plan：生成完整删除计划
+    ↓
+Execute：全部通过后才执行 rm
+```
+
+不能边扫描边删除，等扫描到 `dgraph` 才发现前面的数据已经删除。这里的“全部”首先指**单次 Python 调用处理的 Root**；后文 Shell 逐 Root 调用，不提供跨 Root 的原子性。若要求任何 Root 校验失败时所有 Root 都不删除，需要先完成所有 Root 的全局预检。
+
+同样，执行阶段也不是事务：第一个删除成功、第二个失败时，前者不会自动回滚。日志必须区分计划删除、实际成功和失败项。
+
+## 七、执行前再检查目录边界与并发变化
+
+被删除目录必须是当前 Job 的直接子目录。例如：
+
+```text
+JOB:    hdfs:///flink/checkpoints/dws/job-a
+DELETE: hdfs:///flink/checkpoints/dws/job-a/run-001
+```
+
+下面的路径则必须拒绝：
+
+```text
+DELETE: hdfs:///flink/checkpoints/dws/other-job
+```
+
+概念上是：
+
+```text
+dirname(delete_path) == job_path
+```
+
+实现时不能只做字符串前缀比较。需要解析和规范化 URI，确认 scheme、nameservice 和路径边界一致，拒绝根目录、父目录、通配符以及含义不明确的路径，再以独立参数传给 HDFS 命令。
+
+还要考虑 Inventory 与 Execute 之间的变化：扫描之后，作业可能重新启动、恢复任务可能引用旧目录。正式执行应再次确认候选状态，并通过调度互斥和发布流程协调避免竞争。只加本地锁不能防止另一台 Worker 启动相同任务；重新检查也不能消除与并发写入之间的全部时间窗口。无法协调时，应保持 Dry Run。
+
+## 八、DolphinScheduler：解释器与脚本路径都要明确
+
+部署到调度环境后，曾遇到：
+
+```text
+/bin/python3: can't find '__main__' module in ''
+```
+
+这个错误提示应先排查 Python 实际接收到的入口参数：可能是空值、目录路径或资源定位错误，不能仅凭这一行断定唯一原因，也不能认为改成绝对解释器路径就能修复。
+
+在明确使用 `/bin/python3` 的环境中，可以固定解释器：
+
+```bash
+PYTHON_BIN="/bin/python3"
+"$PYTHON_BIN" /path/flink_checkpoint_lifecycle.py
+```
+
+同时检查解释器可执行、脚本是可读文件、资源已经绑定并下载到 Worker。不要只依赖 `#!/usr/bin/env python3` 来保证调度环境的版本一致性。
+
+如果通过工作目录查找脚本，必须处理“找不到”和“同名文件不止一个”两种情况；直接 `find ... -print -quit` 会隐藏重复文件，可能选到旧版本。
+
+## 九、HDFS HA：不要写死 NameNode IP
+
+另一次失败日志是：
+
+```text
+ERROR: command failed (hdfs dfs -ls -t hdfs://172.30.50.12:8020/...)
+Operation category READ is not supported in state standby
+```
+
+这说明请求落到了不接受该操作的 Standby NameNode。把地址手工换成当前 Active 只能临时解决，下次 HA 切换后还会失败。
+
+应在实际执行任务的 Worker 环境中检查：
+
+```bash
+hdfs getconf -confKey fs.defaultFS
+```
+
+如果返回 `hdfs://nameservice1`，使用逻辑 nameservice URI：
+
+```text
+hdfs://nameservice1/flink/checkpoints/dws/
+```
+
+也可以在默认 HDFS 配置正确时使用：
+
+```text
+hdfs:///flink/checkpoints/dws/
+```
+
+逻辑 URI 需要客户端加载对应的 NameNode 地址和 failover provider 配置，不能只改 URI 字符串。应在 DolphinScheduler 的执行用户、配置目录和认证环境下验证访问。[Hadoop HDFS HA 配置说明](https://hadoop.apache.org/docs/r3.4.0/hadoop-project-dist/hadoop-hdfs/HDFSHighAvailabilityWithQJM.html)
+
+## 十、HDFS 输出异常时立即停止
+
+运行过程中还遇到过：
+
+```text
+ERROR: unexpected 'hdfs dfs -ls' output: 'testtwo1'
+```
+
+脚本预期的数据行类似：
+
+```text
+drwxr-xr-x - hdfs supergroup 0 2026-09-07 18:14 hdfs:///xxx/testtwo1
+```
+
+但拿到的却只有 `testtwo1`。此时不能简单 `continue`：程序已经无法可靠理解目录清单，就不应继续推导哪个目录可以删除。
+
+解析器需要识别正常的列表头，分离标准输出与错误输出，检查命令退出状态；对无法解释的数据行立即失败。建议记录完整上下文：
+
+```text
+ERROR: unexpected HDFS ls output
+parent=hdfs:///xxx/flinkjob1
+command=hdfs dfs -ls -t hdfs:///xxx/flinkjob1
+line='testtwo1'
+```
+
+本方案约定此类错误返回 `exit code 2`。这属于脚本的错误处理约定，并不是所有 HDFS 错误天然使用同一退出码。
+
+## 十一、多个 Root 的统一调度示例
+
+下面保留此次实践中的路径清单，默认全部 Dry Run。使用前需要确认每条路径确实遵循 `ROOT/JOB/GENERATION`，不能因为名字包含 `checkpoints` 就套用两层规则。尤其是看起来已经细分到某个业务或 Job 的路径，要核对是否多传或少传了一层。
+
+脚本通过零分隔读取查找结果，发现同名文件不止一个时失败，避免随机选择旧版本：
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+PYTHON_BIN="/bin/python3"
+SLEEP_SECONDS=60
+
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "ERROR: Python interpreter is not executable: $PYTHON_BIN" >&2
+  exit 2
+fi
+
+RESOURCE_LIST="$(mktemp)"
+trap 'rm -f "$RESOURCE_LIST"' EXIT
+find "$PWD" -type f -name 'flink_checkpoint_lifecycle.py' -print0 > "$RESOURCE_LIST"
+
+SCRIPT_PATH=""
+SCRIPT_COUNT=0
+while IFS= read -r -d '' candidate; do
+  SCRIPT_PATH="$candidate"
+  SCRIPT_COUNT=$((SCRIPT_COUNT + 1))
+done < "$RESOURCE_LIST"
+
+if [ "$SCRIPT_COUNT" -ne 1 ] || [ ! -r "$SCRIPT_PATH" ]; then
+  echo "ERROR: expected exactly one readable cleanup script; found $SCRIPT_COUNT" >&2
+  exit 2
+fi
+
+"$PYTHON_BIN" --version
+echo "SCRIPT_PATH: $SCRIPT_PATH"
+
+run_cleanup() {
+  local ckpt_root="$1"
+  shift
+
+  echo "CKPT_ROOT: $ckpt_root"
+  echo "START_TIME: $(date '+%F %T')"
+
+  "$PYTHON_BIN" "$SCRIPT_PATH" \
+    --root "$ckpt_root" \
+    --min-age-hours 144 \
+    --max-list-lines 1000 \
+    "$@"
+
+  echo "END_TIME: $(date '+%F %T')"
+  sleep "$SLEEP_SECONDS"
+}
+
+run_cleanup "hdfs:///flink/checkpoints/dws/dgraph/"
+run_cleanup "hdfs:///flink/checkpoints/dim/"
+run_cleanup "hdfs:///flink/checkpoints/ods/"
+run_cleanup "hdfs:///flink/checkpoints/dwd/"
+run_cleanup "hdfs:///flink/checkpoints/dws/" --exclude-job dgraph
+run_cleanup "hdfs:///dolphinscheduler/hdfs/resources/flink-checkpoints/dws/"
+run_cleanup "hdfs:///flink-checkpoints/data-bill-early-warning-result/"
+run_cleanup "hdfs:///flink/dinky01/checkpoints/receive-data/"
+run_cleanup "hdfs:///flink/checkpoints/receive-data/ods/"
+run_cleanup "hdfs:///flink/checkpoints/receiver/"
+
+echo "ALL CKPT ROOTS FINISHED"
+echo "TIME: $(date '+%F %T')"
+```
+
+这份清单里的 DolphinScheduler 资源中心路径是历史治理对象，不是推荐的新目录布局。新 Checkpoint 应与调度资源目录分离；原有资源中心条目还要遵循对应版本的资源管理流程，具体背景见上一篇。
+
+观察期间不添加 `--execute`。只有安全条件和灰度验收通过后，才在选定范围的 Python 调用中显式增加该参数。这个 Shell 的串行调用和失败退出只覆盖当前进程，仍需在调度器中防止周期重叠和多 Worker 重复执行。
+
+## 十二、控制 NameNode 压力
+
+清理任务不能为了释放空间，反过来制造集中的元数据压力。这次采用三种调度策略：
+
+1. **Root 串行执行。** 不同时启动 dws、ods、dim、dwd 等清理任务。
+2. **Root 之间增加间隔。** 示例为 60 秒，必要时可调整为 120 秒或 300 秒。
+3. **在业务低峰运行。** 按存储增长速度选择每天或每周执行，无需默认每小时扫描。
+
+这些间隔是调度起点，不是经过容量验证的通用安全值。应观察 NameNode RPC 延迟、队列和 GC，以及同期 Checkpoint 时长和失败率，再决定频率与批次大小。
+
+Root 间休眠只能缓解 Root 之间的连续压力，不能限制一个巨大 Root 内部的扫描或删除突发。必要时还要限制每批候选数量、设置操作间隔和超时；大目录删除本身也有成本。
+
+## 十三、--max-list-lines 只限制日志量
+
+上一篇把这个参数描述为“限制单次 HDFS 列表输出规模”，容易让人误以为它限制了扫描规模。结合旧脚本的实现，更准确的说法是：**它只限制候选目录的递归内容打印行数。**
+
+如果实现是：
+
+```python
+lines = client.list_recursive(target.path)
+shown = lines[:1000]
+```
+
+而 `list_recursive()` 内部调用 `hdfs dfs -ls -R`，即使目录有 500000 个文件，HDFS 仍需要完成整个遍历。最终只打印 1000 行，不会把扫描规模降到 1000。
+
+因此，它减少的是 DolphinScheduler 日志量，不是 NameNode 元数据访问量；如果完整输出先进入内存，客户端内存开销也不会因打印截断而消失。
+
+## 十四、默认不要递归展示候选内容
+
+删除旧实例前，再执行一次：
+
+```bash
+hdfs dfs -ls -R "<generation-path>"
+```
+
+可能遍历成千上万个文件。常规审计通常只需要记录保留对象、候选路径、判断依据和实际执行结果：
+
+```text
+JOB hdfs:///flink/checkpoints/dws/job-a
+KEEP hdfs:///flink/checkpoints/dws/job-a/run-003
+WOULD-DELETE hdfs:///flink/checkpoints/dws/job-a/run-001
+WOULD-DELETE hdfs:///flink/checkpoints/dws/job-a/run-002
+```
+
+建议进一步增加 `--list-contents`：默认不递归展示内容，只有排查时才显式开启。该改动必须落在 Python 实现中，单纯不传参数无法改变上一篇旧脚本始终递归列举候选的行为。
+
+这能减少一次不必要的完整遍历。用于安全校验的有限深度探测、必要清单读取和删除操作仍然存在，不能把“不打印内容”误解成“无需访问元数据”。
+
+## 十五、从单目录 Dry Run 到受控删除
+
+此次上线采用分阶段灰度：
+
+| 阶段     | 范围                               | 模式             | 重点检查                                |
+| -------- | ---------------------------------- | ---------------- | --------------------------------------- |
+| 第一阶段 | 单个已确认结构的 Root              | Dry Run          | KEEP、候选、年龄判断、排除项和层级      |
+| 第二阶段 | 扩大 Root 范围                     | Dry Run          | 父子隔离、HA 配置、任务耗时与元数据压力 |
+| 第三阶段 | 先限定 Root 和删除批次，再逐步扩大 | 显式 `--execute` | 实际删除结果、恢复验证、失败退出与告警  |
+
+第一阶段的任务可以命名为“CKPT 清理脚本单目录试运行观察”，连续观察数个周期。验收不能只看任务退出码为零，还要检查保留目录是否满足恢复要求、候选是否已经停止使用，以及排除和保护规则是否覆盖真实路径。
+
+正式执行继续保持串行、Root 间休眠、低峰运行、最小年龄保护、有效 Trash、嵌套目录检测和严格校验。发生异常时暂停后续删除并审查计划，不盲目重试。
+
+这里描述的是灰度流程和上线条件，未提供集群实测指标或恢复演练记录，因此不能据此声称某个扫描频率已经通过生产容量验证。
+
+## 十六、最终安全原则
+
+经过这次改造，Checkpoint 自动清理至少需要守住以下边界：
+
+- 默认 Dry Run，真正删除必须显式启用。
+- 最新 generation 始终保留，但不把“最新”当作“可恢复”的证明。
+- 最小年龄只过滤候选，活跃实例、恢复依赖和回滚保护要单独确认。
+- 父子 Root 显式隔离，排除项和保护项未匹配时失败。
+- 异常目录层级、无法解析的输出和不完整清单都不能进入删除阶段。
+- 先完成清单与安全校验，再生成计划和执行；明确单 Root 与全局范围的区别。
+- 执行前复核 URI 边界和候选状态，并协调调度、发布与恢复操作。
+- HA 使用正确配置的 nameservice，执行环境固定解释器并验证脚本资源。
+- 多 Root 串行，避免任务重叠，减少无意义的递归遍历。
+- 保留可验证的恢复能力和执行审计，承认部分删除失败无法自动回滚。
+
+最初只是想“每个 Job 留一份，清理历史目录”，最终需要处理的却是目录所有权、嵌套 Root、恢复依赖、HA、调度环境和元数据压力。
+
+**生产环境中的删除脚本，最重要的能力是知道什么时候必须停止。** 真正可靠的自动化，需要把人工操作中的谨慎判断转化为可验证的约束，而不只是把 `hdfs dfs -rm -r` 放进定时任务。
