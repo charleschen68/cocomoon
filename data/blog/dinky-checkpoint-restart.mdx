@@ -1,0 +1,133 @@
+---
+title: 'Dinky 故障自动恢复续跑：从“白查 savepoint”到带状态重启的运维闭环'
+date: '2026-09-20'
+tags: ['dinky', 'flink', 'savepoint', 'checkpoint', 'dolphinscheduler', 'openapi', '运维']
+draft: false
+summary: '把一个挂在 DolphinScheduler 上的“自动重启 Dinky 任务”脚本从“查出状态却没续跑”修成真正带 savepoint 恢复的续跑闭环，并梳理生产化与架构升级。'
+images: ['static/images/avatar_bak.png']
+---
+
+在实时链路里，Flink 任务是常年不眠的。集群抖动、OOM、上游短暂卡死，都可能让一个 Dinky 托管的作业跌进 `FAILED`。此时最痛的往往不是“任务失败了”，而是**从什么时候、能不能、以什么代价把它拉回来**。
+
+本文记录的是一个挂在 DolphinScheduler 告警/定时节点里的运维脚本：传一个任务名，自动查出它最近一份可用状态，再向 Dinky OpenAPI 发起恢复重启。它本身不长，却踩中了好几个“看着在跑、其实没跑对”的经典陷阱。
+
+> 全文脱敏：文中不含任何业务路径、内网地址、队列名与凭据；仅保留机制与可复用设计。
+
+---
+
+## 一、背景：一个“薛定谔的恢复”脚本
+
+最初的实现逻辑大致是：
+
+1. 连接 Dinky 元数据库，按任务名查出 `task_id`；
+2. 关联作业实例与历史记录，从 `checkpoints_json` 里取出最近一份 `externalPath`（savepoint/checkpoint 路径）；
+3. 调用 Dinky OpenAPI 把任务重新提交上去。
+
+思路完全正确——这是把 Flink 的“状态恢复”能力接进调度平台的标准姿势。但真实上线后它长期处于一种诡异状态：**每次调用都返回成功，任务也“重新跑起来了”，可下游数据却总是断流或乱序，需要人肉兜底。** 这跟之前排查 YARN 时遇到的“薛定谔 bug”异曲同工——现象时好时坏，全看运气，而运气来自一个没人注意的细节。
+
+问题不在“能不能重启”，而在“以什么状态重启”。
+
+---
+
+## 二、架构：状态从哪里来，续跑就指向哪里
+
+一个带状态恢复的续跑闭环，本质上只做两件事：**定位最近的可用状态点**，把状态恢复指令**送达调度平台并让它真正生效**。
+
+```text
+任务名
+  ↓
+元数据库：查 task_id
+  ↓
+元数据库：查最近 externalPath（ckpt/savepoint）
+  ↓
+有路径 → restartTask(id, savePointPath)   从最近状态恢复续跑
+无路径 → submitTask(id)                   降级为零重跑 + 显式告警
+  ↓
+按 HTTP 状态回退出码 → DolphinScheduler 判定成败
+```
+
+Dinky 的 OpenAPI 在这套链路里起了网关隔离作用。和 StreamPark 那次踩坑一样，**内网 API 与对外开放的 OpenAPI 是严格隔离的两套入口**：认浏览器 Session 的内网接口喂它 Token 会被拒；只有 `/openapi/*` 才认纯 Token。恢复续跑要走对的那一套。
+
+恢复本身在语义上，ckpt 与 savepoint 对“从最近状态续跑”而言是等价的：把最近一份 `externalPath` 交给 `restartTask` 的 `savePointPath`，Flink 就会从该快照恢复，而不是从零开始。所以脚本**不需要二选一**——查到哪份就从哪份续，查不到才退化为零重跑，并把“无状态可恢复”这件事显式打出来，而不是静默地假装成功。
+
+---
+
+## 三、内容：四个“看着对其实没跑对”的坑
+
+### 坑一：入口名打错，主逻辑根本进不去
+
+最致命的往往最不起眼。脚本末尾写成：
+
+```python
+if name == "main":
+    status_code = automatic_restart_dinky_task(task_name)
+```
+
+`name` 这个变量全文件都没定义过，执行到这一行直接 `NameError`——**整个主逻辑永远进不去，脚本等于白写**，但因为前面 `print` 了不少东西，很容易误以为它在跑。正确写法是：
+
+```python
+if __name__ == "__main__":
+```
+
+这个坑的典型特征是“看起来有输出、看似在运行，实则核心动作从未发生”。
+
+### 坑二：辛苦查了状态，payload 里却没用上
+
+`sql2` 一路 `inner join` 到 `dinky_job_history`、再 `JSON_EXTRACT` 出 `history[0].externalPath`，结果最后真正发出的请求体是：
+
+```python
+payload = {"id": task_id, "config": {"yarn.queue": "..."}}
+```
+
+`savePointPath` 压根没进 payload。**这是整个脚本最隐蔽的失效点**：它每次都“成功”提交，但实际是**从零重跑**——流任务从零开始意味着状态全丢、下游重复或遗漏。修复就是把查到的路径传进 `restartTask`：
+
+```python
+restart_url = api + "/restartTask?id=%s&savePointPath=%s" % (task_id, savepoint_path)
+resp = requests.get(restart_url, timeout=30)
+```
+
+### 坑三：`pop` 代理不设默认值，worker 节点上必崩
+
+```python
+os.environ.pop('http_proxy')   # 环境变量不存在 → KeyError
+os.environ.pop('https_proxy')
+```
+
+worker 节点上常常根本没设代理，`pop` 没有默认值就会 `KeyError` 直接退出。统一改 `pop('http_proxy', None)`，并顺手把大写 `HTTP_PROXY/HTTPS_PROXY` 一起清掉。
+
+### 坑四：任务名裸拼 SQL
+
+`'... where name="%s"' % task_name` 是字符串拼接，任务名里一旦有引号就拼坏、甚至被注入。最小化转义：
+
+```python
+def _quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+```
+
+顺带把变量名 `id`（会盖住内置 `id()`）改名，以及让脚本按 HTTP 状态回退出码——2xx 回 0，否则回 1，方便 DolphinScheduler 判定节点成败。
+
+---
+
+## 四、生产价值：把“恢复”从人工动作变成可判定信号
+
+这个脚本的真正价值，不在于“它能重启任务”（很多脚本都能），而在于它把**状态恢复从一次人肉操作，变成了一个可被调度平台判定成功/失败的自动化信号**：
+
+- **续跑而非重跑**：有状态就恢复，无状态才零重跑且必告警，杜绝“静默从零开始”的数据事故；
+- **可判定退出码**：让调度平台知道这次恢复到底成没成，而不是“发出去就不管了”；
+- **与状态清单脚本解耦**：它只负责“查最近状态 + 发恢复指令”，HDFS 上那份 `chk-N` 是否真的存在且完整，交由专门的路径清单脚本确认——**职责单一，便于各自灰度**。
+
+配合定时巡检，它构成了一条“发现失败 → 定位最近状态 → 自动恢复 → 判定成败 → 告警推送”的闭环，把一次值班响应压进分钟级。
+
+---
+
+## 五、未来架构升级：从脚本闭环到平台能力
+
+脚本能顶一阵，但企业级自愈不该停留在“一个 Python 文件干到底”。下一步的演进方向：
+
+1. **状态可信度校验前置**：续跑前先确认 `savePointPath` 在 HDFS 上确实存在、含 `_metadata`、且与当前 JAR/算子 UID/Flink 版本兼容，避免指向已清理 or 已损坏的状态点。
+2. **恢复策略参数化**：区分“强制零重跑 / 最近 ckpt / 最近 savepoint / 指定历史点”等策略，而不是写死 `history[0]`；并支持幂等恢复窗口，防止重复重启放大消费。
+3. **配置外置 + 凭据脱敏**：数据库地址、Token、队列名从环境变量或配置中心读取，脚本不再携带明文；OpenAPI 调用统一走一套鉴权封装（注意内外网入口隔离、Token 是否带前缀）。
+4. **可观测与熔断**：每次恢复尝试写审计日志（谁、何时、从哪个状态、结果），对连续失败 N 次的任务自动熔断并转人工，避免“反复失败、反复拉起、反复告警”的风暴。
+5. **从 DolphinScheduler 节点升级为平台原生能力**：长远看，恢复编排应收进 Dinky/StreamPark 的作业生命周期管理，脚本退化为兜底入口而非主链路。
+
+核心一句话：**恢复不是“把任务拉起来”，而是“在正确、可信、可判定的状态下，把任务拉回来”。** 脚本能解决当下，但真正的健壮性来自把状态恢复做成一层可校验、可观测、可熔断的平台能力。
