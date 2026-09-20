@@ -1,0 +1,295 @@
+---
+title: 'Dinky 批量自愈编排：从“查状态没续跑”到可判定的自动恢复闭环'
+date: '2026-09-20'
+tags: ['Dinky', 'Flink', 'Savepoint', 'DolphinScheduler', 'YARN']
+draft: false
+summary: '把一个挂在 DolphinScheduler 上的“自动重启 Dinky 任务”脚本，从“查出 savepoint 却没用上”修成“逐条续跑 + YARN 体检 + 可判定告警”的自愈编排。'
+images: ['static/images/avatar_bak.png']
+---
+
+上一期《Dinky 故障自动恢复续跑：从“白查 savepoint”到带状态重启的运维闭环》修的是**单任务执行器**：给定一个任务名，查最近 savepoint/ckpt 并带状态恢复重启。
+
+这一期讲的是它的上游——**批处理编排器**：一张「待重启任务清单」进来，逐条交给执行器拉起，等一会儿确认 YARN 上真的起来了，没起来的统一预警，最后清理队列。两者合起来，才是一条完整的“发现 → 恢复 → 体检 → 告警”自愈链路。
+
+> 全文脱敏：不含任何业务路径、内网地址、队列名与凭据；代码中的密钥均为占位符。
+
+---
+
+## 1. 背景：从“单兵”到“军团”
+
+执行器解决“把一个任务拉起来”，但真实运维场景从来不是单个任务出问题——一次集群抖动、一次上游断流，往往让一批 Flink 任务同时跌进 `FAILED`。这时需要一个**编排器**把“逐条重启 + 验证 + 报警”串成一条流水线。
+
+原编排器的骨架是完整且正确的：
+
+```text
+stopped_task.txt（待重启清单）
+    ↓
+① 主循环：逐条交给执行器
+      - 命中排除名单 → 跳过
+      - 重启成功 → 发“已重启”告警
+    ↓  等待 N 秒让任务在 YARN 上真正起来
+② 体检：yarn application -list vs 期望清单
+      - 期望在跑、却没在跑的 = 重启失败 → 统一预警
+    ↓
+③ 删除 stopped_task.txt 收尾
+```
+
+思路没问题，但这份脚本和上期执行器一样，栽在几个“看着在跑、其实没跑对”的隐患上。
+
+---
+
+## 2. 核心概念：编排器和执行器要解耦
+
+一个可维护的自愈系统，不该把所有逻辑塞进一个文件。这里刻意做两层：
+
+- **执行器**（`dinky_restart_from_checkpoint.py`）：单任务、单职责——查状态、发恢复指令。
+- **编排器**（`dinky_batch_restart.py`）：批处理、可观测——读清单、循环调用、体检、告警、清理。
+
+编排器通过直接 import 执行器的 `restart_task` 来复用其状态恢复逻辑，而不是复制粘贴一份：
+
+```python
+from dinky_restart_from_checkpoint import restart_task
+```
+
+好处是执行器的修复（状态续跑、代理生命周期、SQL 转义）自动惠及编排器，两套代码只维护一份状态逻辑。
+
+---
+
+## 3. 如何工作：五个坑与五处修正
+
+### 3.1 致命 typo：`if name == "main":`
+
+这是上一期执行器的老毛病，在编排器里**原样复制**：
+
+```python
+# 原脚本：name 从未定义，一执行就 NameError，主逻辑一行都跑不到
+if name == "main":
+    ...
+```
+
+`name` 全文件没定义，执行到这一行直接 `NameError`，整条流水线永远进不去。而前面 `print` 过不少东西，极易误判为“在运行”。这正是它最危险的属性——**静默失效**。修正只一字之差：
+
+```python
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+```
+
+两个脚本栽同一个坑，说明是复制粘贴时带过去的——修一处要连带排查另一处。
+
+### 3.2 凭据硬编码：DB 口令与告警 token 全贴在代码里
+
+原脚本把数据库口令、告警通道 token、chat_id 全部明文写在脚本里（注释里还藏着一份备用通道）。一旦提交进 git 或知识库，凭据即永久泄漏。这类问题与“数据脱敏”是同一件事：**任何通道凭据都不该进版本控制**。
+
+修正后一律走环境变量，脚本与知识库中不保存任何明文：
+
+```python
+# 执行器：数据库口令只从环境变量读取，无默认值
+DB = {
+ "host": os.environ.get("DINKY_DB_HOST", "10.8.0.1"),
+ "user": "dinky",
+ "password": os.environ.get("DINKY_DB_PASSWORD"),  # 必填，不写默认值
+ "database": "dinky",
+}
+```
+
+### 3.3 代理生命周期：三套地址反复横跳
+
+原脚本对代理的处理是典型的“顺序强依赖”：
+
+1. 执行器把 `http_proxy` **pop 掉**，直连内网 openapi；
+2. 重启成功后又 `os.environ['http_proxy'] = '...:13080'` **写回**；
+3. 而告警调用走的是**另一个**代理地址。
+
+三套地址、三处时机，极易出现“重启调用走了 A 代理成功、告警走了 B 代理没通——任务真拉起来了，你却没收到确认”。修正后由 `set_proxy()` 单处集中切换：
+
+```python
+def set_proxy(base_url):
+    # 调内网网关前启用代理；调 openapi 前由执行器清除。单点切换，互不干扰。
+    if base_url.startswith("http://") or base_url.startswith("https://"):
+        host = re.sub(r"^https?://", "", base_url).split("/")[0]
+        os.environ["http_proxy"] = "http://" + host
+        os.environ["https_proxy"] = "http://" + host
+    else:
+        os.environ.pop("http_proxy", None)
+        os.environ.pop("https_proxy", None)
+```
+
+### 3.4 单条预警方法：一个通用的 `alert()`
+
+告警不写死任何一种通道（飞书 / 钉钉 / Webhook 网关皆可），抽成一个通用方法，通道与凭据从环境注入：
+
+```python
+CHECK_RETRIES = int(os.environ.get("ALERT_RETRIES", "3"))
+
+def alert(text):
+    # 单条预警方法：Webhook 与凭据来自环境变量，绝不硬编码。
+    webhook = os.environ.get("ALERT_WEBHOOK")
+    token = os.environ.get("ALERT_TOKEN")
+    if not webhook:
+        print("WARN: ALERT_WEBHOOK 未设置，跳过告警: " + text)
+        return None
+    payload = {"text": str(text)}
+    if token:
+        payload["token"] = token
+    set_proxy(os.environ.get("CHECK_PROXY", "http://alert-gateway:13080"))
+    for attempt in range(CHECK_RETRIES):
+        resp = requests.post(webhook, json=payload, timeout=15)
+        if 200 <= resp.status_code < 300:
+            print("ALERT SENT HTTP " + str(resp.status_code))
+            return resp
+        print("ALERT RETRY %d/%d HTTP %d" % (
+            attempt + 1, CHECK_RETRIES, resp.status_code))
+        time.sleep(2)
+    return None
+```
+
+要点：凭据零硬编码；带重试；未配置时降级为打印而非抛异常——编排器不因告警通道故障而中断重启主流程。
+
+### 3.5 YARN 体检：解析要跳过表头与分隔行
+
+`yarn application -list` 输出前面有表头行和分隔行，正则若不跳过，会把 `Application-Id` 那行也当成任务名：
+
+```python
+import subprocess
+
+def yarn_running_names():
+    # 解析 yarn application -list，返回当前在 YARN 上跑着的任务名集合。
+    output = subprocess.check_output(
+        ["yarn", "application", "-list"], universal_newlines=True
+    )
+    running = set()
+    for line in output.splitlines():
+        stripped = line.strip()
+        # 跳过表头与分隔行：Application-Id 开头、全为连字符/等号。
+        if stripped.startswith("Application-Id") or re.match(r"^[-=]{3,}$", stripped):
+            continue
+        match = re.match(r"^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)", line)
+        if match:
+            running.add(match.group(2))   # 第 2 列即应用名
+    return running
+```
+
+---
+
+## 4. 实战：保留 force_cold 这条业务约束
+
+重构时最容易犯的错是“想当然地抹平业务特殊性”。原脚本里有一个隐藏但关键的路由：
+
+```python
+if task_name in ["orderResultPro", "xxx-feature-two", "xxx-statistics-two"]:
+    response = requests.post(submitTask_url, json=payload)   # 强制从零重跑
+else:
+    response = requests.get(restartTask_url)                # 带状态续跑
+```
+
+部分任务**按业务要求不能带状态恢复**（例如纯重放型计算），必须走 `submitTask` 从零重跑，而不是 `restartTask` 续跑。静默把它们统一进“自动续跑”，等于把业务约束抹掉，后果是这些任务每次都被错误地“带状态恢复”。
+
+修正：把它显式化为一个可配置名单，编排器据此路由 `force_cold`：
+
+```python
+# 强制 submitTask 从零重跑的任务（按业务要求不可带状态恢复）。
+# 生产建议外置到独立配置或库表，便于运维调整而不动代码。
+COLD_SUBMIT_TASKS = {"orderResultPro", "xxx-feature-two", "xxx-statistics-two"}
+
+def batch_restart(task_names):
+    handled = []
+    for task_name in task_names:
+        if task_name in EXCLUDE_TASKS:
+            continue
+        force_cold = task_name in COLD_SUBMIT_TASKS
+        status_code = restart_task(task_name, force_cold=force_cold)
+        if 200 <= (status_code or 0) < 300:
+            alert("任务 %s 已自动重启成功" % task_name
+                  + ("(从零重跑)" if force_cold else ""))
+            handled.append(task_name)
+        else:
+            alert("任务 %s 自动重启失败(HTTP %s)" % (task_name, status_code))
+    return handled
+```
+
+执行器侧相应加上 `force_cold` 开关：
+
+```python
+def restart_task(task_name, force_cold=False):
+    task_id, savepoint_path = fetch_task(task_name)
+    if not task_id:
+        return None
+    if savepoint_path and not force_cold:
+        # 有可用状态且不强制从零：restartTask 带 savePointPath 续跑。
+        url = DINKY_API + "/restartTask?id=%s&savePointPath=%s" % (
+            task_id, savepoint_path)
+        resp = requests.get(url, timeout=30)
+    else:
+        # 无可用状态或按业务强制从零：submitTask 重跑并显式告警。
+        reason = "强制从零" if force_cold else "查不到可用 checkpoint/savepoint"
+        print("WARN: " + reason + "，改为从零重跑")
+        url = DINKY_API + "/submitTask"
+        payload = {"id": task_id, "config": {"yarn.queue": "root"}}
+        resp = requests.post(url, json=payload, timeout=30)
+    print("HTTP " + str(resp.status_code) + " " + resp.text.strip()[:500])
+    return resp.status_code
+```
+
+---
+
+## 5. 生产价值与最佳实践
+
+### 5.1 可判定的退出码
+
+编排器以“体检结果”决定退出码，让 DolphinScheduler 能判定这次自愈到底成功没有：
+
+```python
+def main(argv):
+    list_path = argv[1] if len(argv) >= 2 else STOPPED_TASK_FILE
+    task_names = read_task_list(list_path)
+    if not task_names:
+        print("没有需要重启的任务，跳过")
+        return 0
+    handled = batch_restart(task_names)
+    failed = verify_in_yarn(handled)          # 等 N 秒后，YARN 上没出现的即失败
+    if failed:
+        alert("以下任务重启后仍未在 YARN 运行(疑似失败)：%s" % ", ".join(failed))
+    remove_task_file(list_path)
+    return 0 if not failed else 1             # 有失败 → 非零码 → 调度判定失败
+```
+
+这比“发出去就不管了”强一个层次——调度平台拿得到成败信号，能挂后续处理。
+
+### 5.2 最佳实践清单
+
+- **凭据零明文**：DB 口令、告警 token 全部环境变量注入；密钥进 `.gitignore` / secret store，绝不进代码与知识库。
+- **通道抽象**：`alert()` 与具体 IM/网关解耦，换通道只改配置。
+- **代理单点化**：一套切换逻辑，不三处硬塞。
+- **保留业务约束**：`force_cold` 这类特殊任务名单外置为配置，重构时不静默抹平。
+- **解析要防御**：`yarn application -list` 跳过表头/分隔行，避免把表头当任务。
+- **主从分离**：执行器单职责、编排器可观测，状态逻辑只维护一份。
+
+---
+
+## 6. 关于 stopped_task.txt：谁来生产它？
+
+原编排器**只消费不生产**这份清单——写入分支被注释掉了，数据链断裂：没有上游产出方，脚本永远空跑。
+
+修正后明确职责：**清单由上游巡检节点产出，本脚本只读取、重启、体检、最后删除。** 若尚无上游产出方，需在 DolphinScheduler 中补一个巡检节点：
+
+```text
+巡检节点：比对 YARN 实跑 vs 期望任务清单 → 把缺失项写入 stopped_task.txt
+          ↓
+编排器：读取 → 逐条 restart_task → 等 N 秒体检 → 告警 → 删除清单
+```
+
+“谁负责产生待办清单、谁负责消费并收尾”是任何批处理自愈系统必须显式回答的问题。把生产与消费的职责画清楚，系统才闭环。
+
+---
+
+## 7. 未来架构升级
+
+脚本能顶一阵，企业级自愈的演进方向：
+
+1. **状态可信度前置校验**：续跑前先确认 `savePointPath` 在 HDFS 上存在、含元数据、且与当前 JAR/算子 UID/Flink 版本兼容，避免指向已清理或已损坏的状态点（参考 [[flink-latest-checkpoint-paths.py]]）。
+2. **恢复策略参数化**：区分“强制从零 / 最近 ckpt / 指定历史点 / 幂等恢复窗口”，防止重复重启放大消费。
+3. **凭据与配置外置化**：DB 口令、告警 token、`force_cold` 名单统一进 secret store 或库表，代码零硬编码。
+4. **可观测 + 熔断**：每次恢复写审计日志（谁/何时/从哪个状态/结果）；连续失败 N 次的任务自动熔断转人工，避免“反复失败、反复拉起、反复告警”的风暴。
+5. **收敛进平台**：长远看，恢复编排应收进 Dinky/StreamPark 的作业生命周期管理，脚本退化为兜底入口而非主链路。
+
+一句话收束这期：**恢复不是“把任务发出去”，而是“确认它在对的状态下，真的起来了”。** 编排器把“发送成功”升级成“体检成功”，这正是自愈系统从“能发命令”迈向“能担责”的分界线。
