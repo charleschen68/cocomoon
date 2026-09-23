@@ -1,83 +1,197 @@
 ---
-title: 'Flink TableFunction 展开 JSON 数组：一个类通吃多 Topic 多 Schema'
+title: 'Flink TableFunction 解析嵌套 JSON 数组：从“UNNEST 报错”到“STRING 内层解析”'
 date: '2026-09-23'
 tags: ['flink', 'tablefunction', 'json', 'kafka', 'udf', '大数据']
 draft: false
-summary: '一个 Kafka 字段里塞着一整串 JSON 数组，要展开成明细行。用 Flink TableFunction 写一个 UDF，靠“按键取值 + 缺失回退”让同一个类同时吃下三个 Topic、三套略有差异的 Schema。'
+summary: 'Kafka 一条消息里，外层是真数组、内层却是“字符串包 JSON 数组”。把内层当 ARRAY<ROW> 去 UNNEST 直接反序列化报错，靠一层 UNNEST + 一层 TableFunction 才解决。'
 images: ['static/images/avatar_bak.png']
 ---
 
-上一期聊的是 Flink 把数据往向量库灌，这一期聊它的上游——**怎么把一条记录里的“嵌套 JSON 数组”干净利落地拆成多行**。
+实时链路里经常遇到这种消息：一个字段里塞着一整串 JSON 数组，要拆成明细行。但难点往往不在“会不会写 UNNEST”，而在**把这一层的数据类型认错了**。
 
-场景很常见：上游把一份用户资料压成一个 Kafka 消息，里面有个字段（姑且叫 `detail`）装的不是标量，而是一整串 JSON 字符串：
+本文记一次真实翻车：外层 `data` 是货真价实的 `ARRAY<ROW<…>>`，可每个 row 里那个装子记录的字段，其实是**一个 STRING，里面塞着带转义的 JSON 数组字符串**——不是原生数组。把它当数组去 `CROSS JOIN UNNEST`，source 端直接反序列化报错、作业起不来。最后靠“一层 UNNEST + 一层 TableFunction”才理顺，并且让**一个 UDF 类同时吃下三个 Schema 略有不同的 Topic**。
 
+## 1. 先看清结构：外层是数组，内层是“字符串包数组”
+
+先别急着写 SQL，把消息体的层级画出来：
+
+```text
+消息体 (JSON object)
+├─ data      : ARRAY<ROW< … > >      ← 外层是真数组，需要 UNNEST 一次
+│   └─ 每个 ROW 有二十余列，其中一列是：
+│       account_detail : STRING      ← 关键：是“字符串”，里面塞着转义的 JSON 数组
+├─ old       : ARRAY<ROW< … > >      （旧值，本场景可忽略）
+├─ type      : STRING   ("UPDATE")
+├─ database  : STRING
+└─ ts        : BIGINT
 ```
-[ { "f1":"...", "f2":"..." }, { "f1":"...", "f2":"..." }, ... ]
+
+而 `account_detail` 这个 STRING 里存的东西，展开长这样（注意那些转义引号 `\"`）：
+
+```text
+[ { "field1": "...", "field2": "..." },
+  { "field1": "..." },
+  ... ]                       ← 这是“被当作字符串存的 JSON 数组”
 ```
 
-一行消息里可能套着 0 到 N 条子记录。下游要的是**一条子记录一行**，还要求——三个 Topic 的数据要汇到一张表，而这三个字段各自的结构并不完全一样。
+判断它到底是“数组”还是“字符串包的数组”，就看 JSON 里那个字段的值：
 
-> 全文脱敏：文中不含任何业务字段名、真实值、Topic 名、内网地址与凭据；示例字段统一写作 `field1/field2/field3`，均为占位符，与生产结构无对应关系。
+- 是原生数组 → 值形如 `[{...}]`（无外层引号、无转义）；
+- 是字符串包的数组 → 值形如 `"[{\\"...\\"]"`（整体带引号、内部 `\"` 转义）。
 
-## 1. 业务背景 — 一个字段，藏着三套结构
+**这是整件事的根**：内层是 STRING，不是 ARRAY。类型系统的 UNNEST 根本看不到“字符串里藏着的数组”，它只认到 STRING 为止。
 
-链路大致是：Kafka → Flink SQL → 下游表。
+顺带说下外层还有几个容易踩的点：`old`、`pkNames` 这类字段源里有、但下游用不到，默认 JSON 反序列化会忽略未知字段，不影响；但 `database`、`table` 这种词在 Flink 里是保留字，DDL 里要加反引号或干脆不声明。
 
-源表从 Kafka 消费，格式是 JSON。真正麻烦的是源消息里有个字段，它本身是一个**被当字符串传的 JSON 数组**——注意“字符串”三个字，外层可能被二次转义成 `"[...]"` 甚至外面还裹了单引号 `' [...] '`。
+## 2. 一个坑：为什么不能把内层当 ARRAY<ROW> 去 UNNEST
 
-更棘手的是，接入的不止一个 Topic，而是**三个**。它们的 `detail` 字段虽然都长成 JSON 数组，但 Schema 有微妙差异：
+最初的写法是这样，想“两层都 UNNEST”：
 
-| 维度           | Topic A           | Topic B / C              |
-| -------------- | ----------------- | ------------------------ |
-| 半掩账号字段名 | `half_account_no` | `half_ec_account_no`     |
-| 二维码字段     | 有 `qr_code_url`  | 没有                     |
-| 外层包裹       | 纯 `[...]`        | 有的带单引号 `' [...] '` |
+```sql
+-- 把 account_detail 声明成 ARRAY<ROW<...>>，然后两层 UNNEST
+SELECT u.uid, b.field1, b.field2
+FROM user_source AS S
+CROSS JOIN UNNEST(S.data) AS u                              -- 摊开外层
+CROSS JOIN UNNEST(u.account_detail) AS b                     -- 想摊开内层
+```
 
-目标：**一个 UDF 类同时吃下三者**，统一输出成同一批列，三个 Topic 之后直接 `UNION ALL` 进一张表，下游零改动。
+两条路都走不通，分别对应两种误解。
 
-## 2. 解决思路 — 为什么选 TableFunction
+### 2.1 误以为内层是数组：把它声明成 ARRAY<ROW<…>>
 
-Flink SQL 里有几种“一对多展开”的手段，对号入座：
+如果信“这看起来就是个数组”，在 DDL 里把 `account_detail` 写成 `ARRAY<ROW<…>>`，再接 `CROSS JOIN UNNEST`。结果 source 端 JSON 反序列化器一碰就挂，整条消息解析失败，报的是：
 
-- **`UNNEST`**：专门拆 `ARRAY` 类型。但我们的数组是**塞在 STRING 里的 JSON 文本**，不是原生 `ARRAY`，`UNNEST` 用不了（除非先 `CAST`，而 JSON→ROW 的嵌套 CAST 在 SQL 里又长又脆）。
+```text
+org.apache.flink.formats.json.JsonParseException: Fail to deserialize at field: data.
+  at org.apache.flink.formats.json.JsonParserToRowDataConverters
+       .lambda$createRowConverter$43b82837$1(...:419)
+  at org.apache.flink.formats.json.JsonParserToRowDataConverters
+       .lambda$wrapIntoNullableConverter$ca96cb8f$1(...:463)
+  at org.apache.flink.formats.json.JsonParserRowDataDeserializationSchema
+       .deserialize(...:91)
+  ...
+Caused by: java.io.IOException: Failed to deserialize JSON
+'{
+  "data": [ { "uid": <int>, ... , "account_detail": "[]", ... } ],
+  "old"   : [ { ... } ],
+  "type"  : "UPDATE",
+  "database": "<db>",
+  "table" : "<table>",
+  "ts"    : <long>,
+  "pkNames": [ "<pk>" ]
+}'
+  at org.apache.flink.formats.json.JsonParserRowDataDeserializationSchema
+       .deserialize(...:97)
+  at org.apache.flink.streaming.connectors.kafka.table
+       .DynamicKafkaDeserializationSchema.deserialize(...:113)
+  ...
+Caused by: org.apache.flink.formats.json.JsonParseException:
+  Fail to deserialize at field: data.
+```
+
+两个要点：
+
+- **报错指向 `data`，不是 `account_detail`**。因为 `account_detail` 嵌在 `data` 的 row 结构里，内层解析失败会冒泡到最外层的 `ARRAY<ROW>` 反序列化节点，于是堆栈报 `Fail to deserialize at field: data`。看堆栈别只盯着最外层字段名，要顺着“是哪一层类型不匹配”往下查。
+- **本质是类型不匹配**:DDL 说这个字段是 `ARRAY<ROW<…>>`,JSON 里它的值却是一个字符串(`"[]"` 或一长串带 `\"` 的转义文本)。反序列化器拿着“期望 array、实际 string”去转,直接失败。这不是数据错、是**类型声明错了**。
+
+这类错误最坑在:它是 **source 端就挂**,不是运行期脏数据触发,而是“每条消息都反序列化不过”,作业直接起不来或消费就崩。
+
+### 2.2 改对了类型，却又去 UNNEST 一个 STRING
+
+顺着报错把 `account_detail` 改成 STRING 是对的。但若还想 `CROSS JOIN UNNEST(u.account_detail)`，又撞墙：
+
+```text
+UNNEST requires a MULTISET / ARRAY type, but got STRING
+```
+
+- `UNNEST` 的操作数**必须是 ARRAY 或 MULTISET**，对 STRING 调用是类型错误，作业起不来。
+- 原因还是上面那句：字符串里“藏”的数组对类型系统不可见，UNNEST 无从展开。
+
+### 2.3 正解：外层 UNNEST 一次 + 内层交给 TableFunction
+
+- 外层 `data` 是真正的数组 → `CROSS JOIN UNNEST(S.data)` 摊开一次；
+- 内层 `account_detail` 是 STRING → 交给一个 `TableFunction` 解析,再用 `LEFT JOIN LATERAL TABLE` 展开成多行。
+
+一句话:**外层用 UNNEST,内层(字符串包数组)用表函数**。
+
+## 3. 解决思路 — 为什么内层选 TableFunction
+
+内层这串“字符串包数组”要展开，手里有几种工具，对号入座：
+
+- **`UNNEST`**：只拆原生 `ARRAY` / `MULTISET`。内层是 STRING，不认。
 - **标量 UDF（`ScalarFunction`）**：一进一出，没法“一条输入吐多条输出”。
-- **表函数 UDF（`TableFunction<Row>`）+ `LATERAL TABLE(...)`**：天生一对多，配合 `LATERAL TABLE` 还能把左侧列和右侧展开列拼成一行。
+- **`TableFunction<Row>` + `LATERAL TABLE(...)`**：天生一对多，配合 `LATERAL TABLE` 还能把左侧列和右侧展开列拼成一行，正好匹配 JSON 数组语义。
 
-于是选 `TableFunction`：输入一列 STRING，内部解析 JSON 数组，`collect()` 每条子记录产出一行 `Row`，SQL 侧用 `LEFT JOIN LATERAL TABLE(...)` 把展开结果接上。
+选 `TableFunction` 的关键收益：**解析逻辑写在 Java 里一次到位**，比在 SQL 里堆嵌套 `JSON_VALUE/CAST/UNNEST` 可读、可测、可复用；而且天然支持一对多。
 
-选它的关键收益：**解析逻辑写在 Java 里一次到位**，比在 SQL 里堆嵌套 `CAST/JSON_VALUE/UNNEST` 可读、可测、可复用得多；而且天然支持一对多，正好匹配 JSON 数组的语义。
+## 4. 这个 UDF 到底解决了什么
 
-## 3. 这个 UDF 到底解决了什么
+### 4.1 一对多展开 + 保留“无任何绑卡”的用户
 
-核心难点有三个，逐一看它们是怎么被消解的。
+`LEFT JOIN LATERAL TABLE(fn(account_detail)) b ON TRUE` 的语义：即便某个用户一条子记录都没有（内层是 `"[]"` 或空串），左侧那行也要保留，右侧各列填 null。这是“**保留无子记录主行**”的刚需——用内连接会把这部分用户直接丢掉。
 
-### 3.1 一对多展开 + 保留“空”用户
+### 4.2 一个类，三个 Schema 通吃
 
-`LEFT JOIN LATERAL TABLE(fn(detail)) b ON TRUE` 的语义是：即便某个用户一条绑卡都没有（`detail` 是 `[]` 或空），左侧那行也要保留，右侧各列填充 null。这是“**保留无子记录主行**”的刚需——用内连接就会把这部分用户直接丢掉。
-
-### 3.2 一个类，三种 Schema 通吃
-
-不写三个类，写一个。诀窍是**永远按键取值、缺失即 null**：
+接入的不是一个 Topic，而是三个，它们的内层数组 Schema 略有差异（字段名、有没有某几列、外层有无引号各不相同）。不写三个类，写一个，诀窍是**永远按键取值、缺失即 null**：
 
 - 字段缺失 → 取值为 `null`，不报错；
-- 某个字段在 A 里叫 `a`、在 B/C 里叫 `a2`：取值时 **`a` 取不到就回退到 `a2`**，最后统一落到同一列；
-- B/C 没有的 `qr_code` 字段，取值自然得 `null`。
+- 某字段在 A 里叫 `x`、在 B/C 里叫 `x2`：取 `x` 取不到就**回退到 `x2`**，统一落到同一列；
+- B/C 没有的字段，取值自然得 `null`。
 
-这样三套 Schema 在同一个 `eval` 里被抹平成同一套输出列。
+这样三套 Schema 在同一个 `eval` 里被抹平成同一套输出列，三个 Topic 之后直接 `UNION ALL`，下游零改动。
 
-### 3.3 输入“脏数据”的兼容
+### 4.3 脏数据兼容
 
-生产里这字符串经常不是“干干净净的 JSON”：
+内层这串经常不是“干净 JSON”:外面裹单/双引号（`' [...] '` / `"\"[...\"\\""`）——先剥壳；空串、`"[]"`、字面量 `"null"`——一行都不产出；外层被二次转义成字符串（`"[...]"`）——解析到 `isTextual()` 再 `readTree` 一层。
 
-- 外面裹单/双引号（`' [...] '` / `\"[...]\"`）——先剥壳；
-- 空串、`[]`、字面量 `"null"`——直接返回一行都不产出；
-- 外层被二次转义成字符串（`"[...]"`）——解析到 `isTextual()` 就再 `readTree` 一层。
+## 5. 代码实现
 
-## 4. 代码实现
+### 5.1 源表与展开
 
-### 4.1 表函数本体
+先把 `data` 声明成 `ARRAY<ROW<…>>`，其中装子记录的字段**必须是 `STRING`**（其余二十余通用属性此处省略）：
 
-下面是脱敏后的核心。（真实字段名已替换为 `field1..fieldN`，仅保留机制。）
+```sql
+CREATE TABLE user_sensitive_source (
+    data ARRAY<ROW<
+        uid            BIGINT,
+        /* ... 其余通用属性省略 ... */
+        account_detail STRING          -- 关键：内层 JSON 数组以“字符串”形式存放
+        /* ... 其余属性省略 ... */
+    >>,
+    type      STRING,
+    ts        BIGINT,
+    proctime AS PROCTIME()
+) WITH (
+     'connector' = 'kafka',
+     'topic'     = 'user_sensitive_topic',
+     -- ${kafka_bootstrap} / 凭据等环境相关配置用变量注入，不写死
+     'scan.startup.mode' = 'latest-offset',
+     'properties.auto.offset.reset' = 'earliest',
+     'format' = 'json'
+);
+
+-- 第一层：UNNEST 把外层 ARRAY<ROW> 摊成“一行一个用户”
+CREATE TEMPORARY VIEW v_user AS
+SELECT u.uid, u.account_detail
+FROM user_sensitive_source AS S
+CROSS JOIN UNNEST(S.data) AS u
+WHERE u.uid IS NOT NULL;
+
+-- 第二层：内层是 STRING，交给表函数展开；LEFT JOIN 保留“无子记录”用户
+CREATE TEMPORARY VIEW v_user_unnest AS
+SELECT
+    u.uid,
+    b.field1, b.field2, b.field3
+FROM v_user AS u
+LEFT JOIN LATERAL TABLE(parse_detail(u.account_detail)) b ON TRUE
+WHERE u.uid IS NOT NULL;
+```
+
+对比 2.1 里“两层都 UNNEST”的错法，差别就在第二层：内层从 `CROSS JOIN UNNEST(u.account_detail)` 换成 `LEFT JOIN LATERAL TABLE(parse_detail(u.account_detail))`。
+
+### 5.2 表函数本体
+
+把内层解析写成 UDF（字段名已替换为 `field1/field2/field3`，仅保留机制）。核心就是：**外层 UNNEST 负责摊开“真数组”，表函数负责展开“字符串包数组”**。
 
 ```java
 package com.fb.udf;
@@ -90,71 +204,65 @@ import org.apache.flink.table.functions.TableFunction;
 import org.apache.flink.types.Row;
 
 // 三个 Topic / 三套 Schema 共用这一个类：
-// 永远“按键取值、缺失即 null”；半掩账号在旧 Schema 叫 half_account_no、
-// 新 Schema 叫 half_ec_account_no，这里做 fallback 统一到同一列；
+// 永远“按键取值、缺失即 null”；别名做 fallback 统一到同一列；
 // 输出固定 N 列，方便多 Topic 之后直接 UNION ALL。
 @FunctionHint(
         input = @DataTypeHint("STRING"),
         output = @DataTypeHint(
-                  "ROW<"
-                        + "field1 STRING, "
-                        + "field2 STRING, "
-                        + "field3 STRING"
-                        + ">"
-        )
+                   "ROW<field1 STRING, field2 STRING, field3 STRING>"
+         )
 )
-public class BankAccountParserYH extends TableFunction<Row> {
+public class AccountDetailParserYH extends TableFunction<Row> {
 
     private static final long serialVersionUID = 1L;
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public void eval(String detail) {
         if (detail == null) {
             return;
-        }
+         }
 
         String value = unquote(detail.trim());
 
-        // 空串 / 空数组 / 字面量 null：一行都不产出
+         // 空串 / 空数组 / 字面量 null：一行都不产出
         if (value.isEmpty()
-                || "[]".equals(value)
-                || "null".equalsIgnoreCase(value)) {
+                 || "[]".equals(value)
+                 || "null".equalsIgnoreCase(value)) {
             return;
-        }
+         }
 
         try {
             JsonNode root = MAPPER.readTree(value);
 
-            // 外层可能被二次转义成字符串，再解析一层
+             // 外层可能被二次转义成字符串，再解析一层
             if (root.isTextual()) {
                 String inner = root.asText();
                 if (inner == null || inner.trim().isEmpty()) {
                     return;
-                }
+                 }
                 root = MAPPER.readTree(inner);
-            }
+             }
 
             if (!root.isArray()) {
                 throw new IllegalArgumentException(
-                        "detail must be JSON array, actual: " + value
-                );
-            }
+                         "detail must be a JSON array, actual: " + value
+                 );
+             }
 
             for (JsonNode item : root) {
                 if (item == null || item.isNull()) {
                     continue;
-                }
+                 }
                 if (!item.isObject()) {
                     throw new IllegalArgumentException(
-                            "array element must be JSON object, actual: " + item
-                    );
-                }
+                             "array element must be JSON object, actual: " + item
+                     );
+                 }
 
-                // 字段 A 缺失时回退到 B，落到同一列
-                String halfAcc = firstNonNull(
-                        getAsString(item, "half_account_no"),
-                        getAsString(item, "half_ec_account_no"));
+                 // 字段 A 缺失时回退到 B，落到同一列
+                String fallback = firstNonNull(
+                        getAsString(item, "x"),
+                        getAsString(item, "x2"));
 
                 Row row = new Row(3);
                 row.setField(0, getAsString(item, "field1"));
@@ -162,146 +270,108 @@ public class BankAccountParserYH extends TableFunction<Row> {
                 row.setField(2, getAsString(item, "field3"));
 
                 collect(row);
-            }
-        } catch (Exception e) {
+             }
+         } catch (Exception e) {
             throw new RuntimeException("Failed to parse detail JSON: " + value, e);
-        }
-    }
+         }
+     }
 
     private static String firstNonNull(String a, String b) {
         return a != null ? a : b;
-    }
+     }
 
-    // 剥掉首尾的单/双引号
+     // 剥掉首尾的单/双引号
     private static String unquote(String s) {
         if (s.length() >= 2
-                && ((s.charAt(0) == '\'' && s.charAt(s.length() - 1) == '\'')
-                 || (s.charAt(0) == '"' && s.charAt(s.length() - 1) == '"'))) {
+                 && ((s.charAt(0) == '\'' && s.charAt(s.length() - 1) == '\'')
+                  || (s.charAt(0) == '"' && s.charAt(s.length() - 1) == '"'))) {
             s = s.substring(1, s.length() - 1);
-        }
+         }
         return s;
-    }
+     }
 
     private String getAsString(JsonNode node, String fieldName) {
         JsonNode field = node.get(fieldName);
         if (field == null || field.isNull()) {
             return null;
-        }
-        // 容器（对象/数组）取 JSON 串，标量取文本
+         }
+         // 容器（对象/数组）取 JSON 串，标量取文本
         if (field.isContainerNode()) {
             return field.toString();
-        }
+         }
         return field.asText();
-    }
+     }
 }
 ```
 
-几个设计决策，单独点名：
+几个设计决策：
 
-- **`ObjectMapper` 用 `static final`**：它本身线程安全、构建昂贵，放成静态常量避免每条记录都 new 一个，GC 压力小得多。注意这里“读”是安全的；若哪天要改成可配置的 schema 缓存，再评估 `ThreadLocal`。
+- **`ObjectMapper` 用 `static final`**：它本身线程安全、构建昂贵，放成静态常量避免每条记录都 new 一个，GC 压力小得多。注意这里“读”是安全的；若哪天改成可配置的 schema 缓存，再评估 `ThreadLocal`。
 - **缺失容错靠 `getAsString`**：字段不存在或 JSON null 一律回 `null`，配合下游 `COALESCE` 兜底，脏数据不会让作业挂。
-- **异常向上抛，但带上下文**：`catch` 里把原始 `value` 拼进异常信息，排障时一眼能定位是哪条消息。
+- **异常带上下文**：`catch` 里把原始 `value` 拼进异常信息，排障时一眼能定位是哪条消息。
 
-### 4.2 部署：ADD JAR 注册
+### 5.3 部署
 
-把类打成 `udf-1.0.jar`（含 Flink 依赖，建议 `shade` 出 Jackson），在平台里注册：
+把类打成 jar（含 Flink 依赖，建议 `shade` 出 Jackson），注册：
 
 ```sql
--- 把 UDF 打成 jar 上传到作业资源目录
-ADD CUSTOMJAR 'rs:udf/bank-account-parser-1.0.jar';
+ADD CUSTOMJAR 'rs:udf/account-detail-parser-1.0.jar';
 
--- 注册表函数
 CREATE TEMPORARY SYSTEM FUNCTION parse_detail
-  AS 'com.fb.udf.BankAccountParser';
+  AS 'com.fb.udf.AccountDetailParserYH';
 ```
 
-### 4.3 数据源与展开
+### 5.4 落库
 
-源表从 Kafka 消费，JSON 格式；消息体里有一个 `ARRAY<ROW<...>>` 装的用户资料，先 `UNNEST` 把外层数组摊开，再对每个用户调用表函数展开其 `detail`：
-
-```sql
-CREATE TABLE dwd_user_sensitive_source (
-    data ARRAY<ROW<uid BIGINT, detail STRING, /* ...更多字段... */>>,
-    ts   BIGINT,
-    proctime AS PROCTIME()
-) WITH (
-    'connector' = 'kafka',
-    'topic'     = 'user_sensitive_topic',
-    -- ${kafka_bootstrap} / 访问凭据等环境相关配置，用变量注入
-    'scan.startup.mode' = 'latest-offset',
-    'properties.auto.offset.reset' = 'earliest',
-    'format' = 'json'
-);
-
--- 第一层：UNNEST 把外层 ARRAY<ROW> 摊成一行一个用户
-CREATE TEMPORARY VIEW v_user AS
-SELECT u.uid, u.detail
-FROM dwd_user_sensitive_source AS S, UNNEST(S.data) AS u
-WHERE u.uid IS NOT NULL;
-
--- 第二层：LEFT JOIN LATERAL TABLE，把 detail 里的 JSON 数组展开成多行
--- 用 LEFT JOIN 保留“一条子记录都没有”的用户
-CREATE TEMPORARY VIEW v_user_unnest AS
-SELECT
-    u.uid,
-    b.field1, b.field2, b.field3
-FROM v_user AS u
-LEFT JOIN LATERAL TABLE(parse_detail(u.detail)) b ON TRUE
-WHERE u.uid IS NOT NULL;
-```
-
-### 4.4 落库
-
-下游 sink 定义统一列（这里省略了 JDBC 连接串、表名、账号等环境相关项，实际用占位变量注入），`INSERT` 时用 `COALESCE` 把 null 兜成空串，主键约束用 `NOT ENFORCED`：
+下游 sink 用 `COALESCE` 把 null 兜成空串，主键约束 `NOT ENFORCED`（连接串、表名、账号用 `${...}` 注入，不写死；调试期先 `print` 再切真实 sink）：
 
 ```sql
 CREATE TABLE dw_user_detail_sink (
-    uid           VARCHAR(32),
-    field1        VARCHAR(128),
-    field2        VARCHAR(128),
-    field3        VARCHAR(128),
-    payment_type  VARCHAR(32),
+    uid      VARCHAR(32),
+    field1   VARCHAR(128),
+    field2   VARCHAR(128),
+    field3   VARCHAR(128),
     PRIMARY KEY (uid) NOT ENFORCED
 ) WITH (
-    -- 生产用 jdbc：'connector','url','table-name','driver' 等
-    -- 用 ${...} 注入内网地址与凭据，绝不写死在 SQL 里
-    'connector' = 'print'   -- 调试期先打 stdout，验证无误再切 jdbc
+     -- 'connector' = 'print'   -- 调试期先打 stdout
+     -- 生产切 jdbc：'connector'/'url'/'table-name'/'driver' 等用 ${...} 注入
+     'connector' = 'print'
 );
 
 INSERT INTO dw_user_detail_sink
 SELECT
-    CAST(b.uid AS VARCHAR)              AS uid,
-    COALESCE(b.field1, '')             AS field1,
-    COALESCE(b.field2, '')             AS field2,
-    COALESCE(b.field3, '')             AS field3,
-    COALESCE(b.payment_type, '')       AS payment_type
+    CAST(b.uid AS VARCHAR)     AS uid,
+    COALESCE(b.field1, '')     AS field1,
+    COALESCE(b.field2, '')     AS field2,
+    COALESCE(b.field3, '')     AS field3
 FROM v_user_unnest b;
 ```
 
-> 一个小细节：`COALESCE(b.unbinding_operator, '')` 这种写法，源里 null 会被兜空串；但 sink PK 是 `(field_a, field_b)`，空串进主键会让“无数据行”互相覆盖——真要进主键的列建议保留 null 语义或加个哨兵值，别全兜成 `''`。
+> 一个小细节：进主键的列别一律 `COALESCE(...,'')` 兜成空串，否则“无数据行”会因主键相同互相覆盖；真进主键的列建议保留 null 或加哨兵值。
 
-## 5. 这套写法的优点
+## 6. 这套写法的优点
 
-- **一物多用的复用性**：一个类吃三套 Schema，靠“按键取值 + 缺失回退”。新来一个 Topic，只要字段能映射到同一批列，**不动 UDF**，只加一条 `SELECT ... UNION ALL` 即可。
-- **解析逻辑下沉到 Java**：比在 SQL 里堆嵌套 `CAST/JSON_VALUE/UNNEST` 可读、可单测、可复用；脏数据容错全在 `eval` 里收口，SQL 侧保持干净。
-- **一对多语义天然对齐**：`TableFunction` + `LATERAL TABLE` 就是 JSON 数组展开的“母语”，`LEFT JOIN` 还顺带保留了空主键行。
-- **环境无关**：内网地址、凭据、topic 名全部 `${...}` 注入，SQL 本身可进 Git 版本管理，不同环境只换变量。
+- **数据类型先认对**：外层 `ARRAY<ROW>` 才用 UNNEST，内层“字符串包数组”才用表函数——这一步认错，后面全是坑。
+- **一物多用的复用性**：一个类吃三套 Schema，靠“按键取值 + 缺失回退”。新来一个 Topic，只要字段能映射到同一批列，**不动 UDF**，只加一条 `SELECT ... UNION ALL`。
+- **解析逻辑下沉到 Java**：比在 SQL 里堆 `JSON_VALUE/CAST/UNNEST` 可读、可单测、可复用；脏数据容错全在 `eval` 里收口，SQL 侧保持干净。
+- **一对多语义天然对齐**：`TableFunction + LATERAL TABLE` 就是 JSON 数组展开的“母语”，`LEFT JOIN` 还顺带保留空主键行。
+- **环境无关**：内网地址、凭据、topic 名全部 `${...}` 注入，SQL 本身可进 Git 版本管理。
 
-## 6. 未来架构优化
+## 7. 未来架构优化
 
-这套能跑，但还不是终点，几个值得继续做的方向：
+这套能跑，但还不是终点：
 
-1. **字段映射外置化**。把“哪个源字段映射到哪个输出列、回退链是什么”做成一份外部配置（YAML/小表），UDF 启动时加载。这样“加一个 Topic / 加一个别名”就是改一行配置，连 UDF 都不用重打包。
-2. **强类型输出**。当前输出全 `STRING`，下游还得再 `CAST`。可以按目标表类型生成精确的 `ROW<a INT, b TIMESTAMP, ...>`，让 Flink 在展开时就做类型转换，减少下游负担。
-3. **坏数据隔离而非中断**。现在异常是向上抛——一条毒消息会让整个算子报错、触发重启。可选：坏行降级成“丢弃 + 打 metrics/落死信 topic”，让主链路不被单条脏数据拖垮；对 SLA 敏感的链路，这比“宁可挂掉”更稳。
-4. **反序列化预热与对象池**。`ObjectMapper` 静态化已做到；若吞吐更高，可考虑 `JsonParserFactory` 复用、`Row` 对象复用，进一步压 GC。
-5. **可观测性**。给“解析成功 / 兜 null / 丢弃坏行 / 回退命中”分别打 counter + gauge，下游能直接看到“有多少行是回退出来的”，比事后翻日志靠谱。
-6. **UDF 版本管理**。jar 带版本号进资源库，发布走评审；字段映射变更留 changelog，避免“改了映射没人知道”。
+1. **字段映射外置化**：把“哪个源字段映射到哪个输出列、回退链是什么”做成外部配置（YAML/小表），UDF 启动时加载；“加一个 Topic / 加一个别名”就是改一行配置，连 UDF 都不用重打包。
+2. **强类型输出**：当前输出全 `STRING`，下游还得再 `CAST`；可按目标表类型生成精确的 `ROW<a INT, b TIMESTAMP, …>`，让 Flink 在展开时就做类型转换。
+3. **坏数据隔离而非中断**：现在异常向上抛——一条毒消息会让算子报错、触发重启。可选：坏行降级为“丢弃 + 打 metrics / 落死信 topic”，让主链路不被单条脏数据拖垮。
+4. **反序列化预热与对象池**：`ObjectMapper` 静态化已做到；吞吐更高时可考虑 `JsonParserFactory` 复用、`Row` 对象复用，进一步压 GC。
+5. **可观测性**：给“解析成功 / 兜 null / 丢弃坏行 / 回退命中”分别打 counter + gauge，下游直接看到“有多少行是回退出来的”，比事后翻日志靠谱。
+6. **UDF 版本管理**：jar 带版本号进资源库，发布走评审；字段映射变更留 changelog。
 
-## 7. 小结
+## 8. 小结
 
-一行 Kafka 消息里塞着一整串 JSON 数组，要拆成多行、还要让三个结构略不同的 Topic 汇入一张表——`TableFunction` + `LATERAL TABLE` 是最贴语义的解法。
+外层是真数组、内层却是“字符串包 JSON 数组”，这种消息最容易栽在**类型认错**上：把内层当 `ARRAY<ROW>` 去 `CROSS JOIN UNNEST`，source 端 JSON 反序列化直接 `Fail to deserialize at field: data`，作业起不来；改成 STRING 又去 `UNNEST`，则撞“UNNEST 只认 MULTISET/ARRAY”的墙。
 
-它的精髓不在“会写”，而在**怎么用一个类吃下多套 Schema**：永远按键取值、缺失即 null、别名回退、脏数据先剥壳。做到这一点，UDF 就从“一次性胶水”变成了“可复用的解析组件”。
+正解是分层处理：**外层 `UNNEST` 摊开真数组，内层 `LEFT JOIN LATERAL TABLE(表函数)` 展开字符串包数组**。而表函数的精髓又不在“会写”，在**怎么用一个类吃下多套 Schema**——永远按键取值、缺失即 null、别名回退、脏数据先剥壳。做到这一点，UDF 就从“一次性胶水”变成“可复用的解析组件”。
 
-下一步把字段映射外置、输出强类型化、坏数据降级而非中断，这条链路就从“能跑”走向“好维护、可观测、扛得住脏数据”。
+再往后：把字段映射外置、输出强类型化、坏数据降级而非中断，这条链路就从“能跑”走向“好维护、可观测、扛得住脏数据”。
