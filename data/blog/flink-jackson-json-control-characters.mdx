@@ -1,0 +1,946 @@
+---
+title: 'Flink 中 Jackson 解析非法 JSON 控制字符：从报错定位到三层容错方案'
+date: '2026-09-29'
+tags: ['flink', 'json', 'jackson', 'kafka', 'udf', '大数据']
+draft: false
+summary: '从 Jackson 的 CTRL-CHAR code 9 报错出发，通过宽松解析、失败后清洗和异常隔离建立三层容错，并结合标准序列化与 DLQ，兼顾原始数据语义和 Flink 实时任务可用性。'
+images: ['static/images/avatar_bak.png']
+---
+
+在实时数据链路中，经常会遇到一种很隐蔽的数据质量问题：
+
+```text
+Caused by: com.fasterxml.jackson.core.JsonParseException:
+Illegal unquoted character ((CTRL-CHAR, code 9)):
+has to be escaped using backslash to be included in string value
+```
+
+典型场景是：
+
+```text
+OceanBase / MySQL
+        ↓
+      Kafka
+        ↓
+   Flink SQL
+        ↓
+ Java UDF / UDTF
+        ↓
+     Jackson
+```
+
+数据库中的某个 `VARCHAR/TEXT` 字段包含了真实的 TAB、换行、回车等控制字符，上游又通过字符串拼接等方式生成了 JSON。
+
+最终 Jackson 在解析时发现：
+
+```text
+CTRL-CHAR, code 9
+```
+
+于是直接抛出异常。
+
+`code 9` 对应的其实就是：
+
+```text
+ASCII 9
+Unicode U+0009
+TAB，也就是 \t
+```
+
+这篇文章介绍一种更适合生产实时任务的处理方式：
+
+- **第一层：Jackson 宽松解析，尽量保留原始字符。**
+- **第二层：失败后清洗控制字符，再尝试解析。**
+- **第三层：仍失败则 try/catch 隔离脏数据，避免 Flink 作业挂掉。**
+
+> 文中的账户字段、标识及 offset 均为说明用示例。
+
+## 一、为什么 TAB 会导致 JSON 解析失败？
+
+先看一个例子。
+
+正常 JSON：
+
+```json
+{
+  "name": "ABC\tDEF"
+}
+```
+
+这里的 `\t` 是两个转义字符：
+
+```text
+\
+t
+```
+
+这是合法 JSON。
+
+但是某些上游系统可能生成：
+
+```text
+{"name":"ABC<TAB>DEF"}
+```
+
+这里 `<TAB>` 不是字符串 `\t`，而是一个真正的：
+
+```text
+U+0009
+```
+
+按照 JSON 标准，字符串内部的控制字符不能直接裸出现。
+
+所以 Jackson 默认会拒绝它：
+
+```text
+Illegal unquoted character
+CTRL-CHAR, code 9
+```
+
+除了 TAB，还有：
+
+| Unicode | ASCII | 含义      |
+| ------- | ----- | --------- |
+| U+0009  | 9     | TAB `\t`  |
+| U+000A  | 10    | LF `\n`   |
+| U+000D  | 13    | CR `\r`   |
+| U+0000  | 0     | NUL       |
+| U+0008  | 8     | Backspace |
+| U+000C  | 12    | Form Feed |
+
+所以如果只处理 `\t`，下一次可能又遇到：
+
+```text
+code 10
+code 13
+```
+
+生产环境最好不要按错误码一个一个打补丁。
+
+## 二、第一层：让 Jackson 容忍裸控制字符
+
+如果我们的业务要求是：
+
+> 控制字符本身有意义，我不希望直接把它删除。
+
+那么第一选择不是 `replace()`，而应该让 Jackson 允许读取这种非严格 JSON。
+
+Jackson 2.10+ 可以使用：
+
+```java
+import com.fasterxml.jackson.core.json.JsonReadFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+
+private final ObjectMapper mapper =
+        JsonMapper.builder()
+                .enable(JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS)
+                .build();
+```
+
+核心配置：
+
+```java
+JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS
+```
+
+作用就是：
+
+> JSON 字符串内部即使存在未转义的控制字符，也允许 Jackson 读取。
+
+例如原始数据：
+
+```text
+abc<TAB>def
+```
+
+解析之后 Java String 中仍然是：
+
+```text
+abc<TAB>def
+```
+
+TAB 不会被删除。
+
+### 为什么这种方式更适合需要“保留原值”的场景？
+
+假设银行账户详情原本是：
+
+```text
+BANK001<TAB>ACCOUNT001
+```
+
+如果直接：
+
+```java
+detail.replace("\t", "");
+```
+
+最终就变成：
+
+```text
+BANK001ACCOUNT001
+```
+
+两个业务字段黏在了一起。
+
+而宽松解析：
+
+```java
+mapper.readTree(detail);
+```
+
+可以在 Java 内部继续保留：
+
+```text
+BANK001<TAB>ACCOUNT001
+```
+
+这是第一层容错。
+
+## 三、一个很重要的问题：宽松读取 ≠ 输出非法 JSON
+
+很多人看到 `ALLOW_UNESCAPED_CONTROL_CHARS` 之后会产生一个误解：
+
+> 那是不是下游也会收到带裸 TAB 的非法 JSON？
+
+不一定。
+
+如果后续继续使用 Jackson 进行标准序列化：
+
+```java
+String json = mapper.writeValueAsString(node);
+```
+
+那么内存中的真实 TAB，会被重新序列化成合法的：
+
+```json
+"\t"
+```
+
+完整过程实际上是：
+
+```text
+上游非法 JSON
+
+abc<TAB>def
+       ↓
+Jackson 宽松读取
+       ↓
+Java String
+abc<TAB>def
+       ↓
+Jackson 标准序列化
+       ↓
+合法 JSON
+abc\tdef
+       ↓
+下游解析
+       ↓
+abc<TAB>def
+```
+
+所以可以同时做到：
+
+**保留业务字符 + 保证传输 JSON 合法。**
+
+这比直接删除字符更合理。
+
+## 四、不要手工拼 JSON
+
+这里还有一个非常常见的坑。
+
+即使 Jackson 已经成功解析，如果后面重新输出 JSON 时使用：
+
+```java
+String result =
+        "{\"detail\":\"" + detail + "\"}";
+```
+
+问题又会回来。
+
+因为 `detail` 内部如果存在：
+
+- TAB
+- 换行
+- 双引号
+- 反斜杠
+
+都可能重新生成非法 JSON。
+
+错误做法：
+
+```java
+String json =
+        "{\"bankAccountDetail\":\""
+        + bankAccountDetail
+        + "\"}";
+```
+
+推荐：
+
+```java
+ObjectNode result = mapper.createObjectNode();
+
+result.put(
+        "bankAccountDetail",
+        bankAccountDetail
+);
+
+String json = mapper.writeValueAsString(result);
+```
+
+让 Jackson 同时负责：
+
+**解析 + 转义 + 序列化。**
+
+不要自己维护 JSON escaping 规则。
+
+## 五、第二层：解析失败后进行控制字符清洗
+
+虽然 `ALLOW_UNESCAPED_CONTROL_CHARS` 能解决裸 TAB / 换行等问题，但真实生产数据可能远比这个脏。
+
+例如：
+
+- JSON 结构截断
+- 错误引号
+- 非法反斜杠
+- 复制粘贴产生的奇怪控制字符
+- 历史系统编码异常
+
+所以可以增加第二层 fallback。
+
+思路：
+
+```text
+原数据
+ ↓
+宽松解析
+ ↓
+失败
+ ↓
+清洗控制字符
+ ↓
+再次解析
+```
+
+例如：
+
+```java
+private static final String CONTROL_CHARS_REGEX =
+        "[\\u0000-\\u001F\\u007F-\\u009F]";
+```
+
+清洗：
+
+```java
+String safe = detail.replaceAll(
+        CONTROL_CHARS_REGEX,
+        " "
+);
+```
+
+这里我更推荐替换为空格 `" "`，而不是 `""`。
+
+原因是：
+
+```text
+ABC<TAB>DEF
+```
+
+如果删除：
+
+```text
+ABCDEF
+```
+
+如果替换为空格：
+
+```text
+ABC DEF
+```
+
+后者通常更容易保持原数据的分隔语义。
+
+## 六、为什么第一层和第二层并不矛盾？
+
+乍看之下，Jackson 保留控制字符和 `replaceAll` 清除控制字符，好像互相矛盾。
+
+其实关键在于执行顺序。
+
+推荐做成：
+
+```text
+                    原始数据
+                       │
+                       ▼
+              ┌────────────────┐
+              │ 宽松 Jackson   │
+              │ 保留原始字符   │
+              └───────┬────────┘
+                      │
+               ┌──────┴──────┐
+               │             │
+              成功          失败
+               │             │
+               ▼             ▼
+           正常输出     控制字符清洗
+                             │
+                             ▼
+                        第二次解析
+                             │
+                             ▼
+                      成功 / 仍然失败
+```
+
+也就是说：
+
+**正常情况下，不清洗：**
+
+```text
+真实 TAB → 保留
+```
+
+**只有数据已经无法解析时，才进入降级路径：**
+
+```text
+清洗控制字符 → 尽可能抢救这一条数据
+```
+
+这才是真正意义上的“双保险”。
+
+## 七、第三层：try/catch，绝对不能让单条脏数据打挂 Flink
+
+实时任务里还有一个比解析失败更严重的问题：
+
+> 一条 poison message 导致整个 Flink Task 无限失败重启。
+
+典型过程：
+
+```text
+Kafka offset = 10001
+        ↓
+读取脏 JSON
+        ↓
+Jackson 抛异常
+        ↓
+Task Failed
+        ↓
+Checkpoint Restore
+        ↓
+重新消费 offset 10001
+        ↓
+再次异常
+        ↓
+再次重启
+```
+
+最后：
+
+```text
+一个脏字段 → 整个 Job 不断重启
+```
+
+这是生产实时链路中必须避免的。
+
+因此最外层必须存在异常隔离。
+
+例如：
+
+```java
+public void eval(
+        String detail,
+        Collector<Row> out) {
+
+    if (detail == null || detail.isEmpty()) {
+        return;
+    }
+
+    try {
+
+        JsonNode root = parse(detail);
+
+        if (root == null || root.size() == 0) {
+            return;
+        }
+
+        // 根据 root 解析业务数据
+        // out.collect(...);
+
+    } catch (Exception e) {
+
+        LOG.warn(
+            "skip unparseable bank_account_detail: {}",
+            e.getMessage()
+        );
+
+        return;
+    }
+}
+```
+
+不过生产环境我建议不要简单 `catch (Exception e)` 吞掉所有异常。
+
+最好至少把 JSON 数据异常和代码 BUG 分开。
+
+例如：
+
+```java
+catch (JsonProcessingException e) {
+
+    LOG.warn(
+        "invalid bank_account_detail json, error={}",
+        e.getMessage()
+    );
+
+    return;
+}
+```
+
+否则如果真正发生了：
+
+- `NullPointerException`
+- `ArrayIndexOutOfBoundsException`
+- 业务逻辑 Bug
+
+也会被 `catch (Exception)` 偷偷吞掉。
+
+这反而会降低系统可观测性。
+
+## 八、完整的三层解析实现
+
+可以把解析逻辑统一封装：
+
+```java
+private static final String CONTROL_CHARS_REGEX =
+        "[\\u0000-\\u001F\\u007F-\\u009F]";
+
+private final ObjectMapper mapper =
+        JsonMapper.builder()
+                .enable(
+                    JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS
+                )
+                .build();
+```
+
+解析方法：
+
+```java
+private JsonNode parseDetail(String detail)
+        throws JsonProcessingException {
+
+    try {
+
+        // 第一层：
+        // 优先解析原始字符串
+        // 保留 TAB / CR / LF 等控制字符
+        return mapper.readTree(detail);
+
+    } catch (JsonProcessingException firstException) {
+
+        // 第二层：
+        // 原始字符串解析失败以后，
+        // 才进入 fallback 清洗
+
+        String safe = detail.replaceAll(
+                CONTROL_CHARS_REGEX,
+                " "
+        );
+
+        return mapper.readTree(safe);
+    }
+}
+```
+
+然后 Flink UDF / UDTF 中：
+
+```java
+public void eval(
+        String detail,
+        Collector<Row> out) {
+
+    if (detail == null || detail.isEmpty()) {
+        return;
+    }
+
+    try {
+
+        JsonNode root = parseDetail(detail);
+
+        if (root == null || root.size() == 0) {
+            return;
+        }
+
+        /*
+         * 根据实际 JSON 结构遍历
+         *
+         * for (JsonNode node : root) {
+         *
+         *     ...
+         *
+         *     out.collect(
+         *         Row.of(...)
+         *     );
+         * }
+         */
+
+    } catch (JsonProcessingException e) {
+
+        // 第三层：
+        // 防止单条 poison message
+        // 导致整个 Flink Task 重启
+
+        LOG.warn(
+            "skip unparseable bank_account_detail, error={}",
+            e.getMessage()
+        );
+    }
+}
+```
+
+这时完整容错链路变成：
+
+```text
+                    bank_account_detail
+                            │
+                            ▼
+                 null / empty 判断
+                            │
+                            ▼
+             ALLOW_UNESCAPED_CONTROL_CHARS
+                            │
+                   ┌────────┴────────┐
+                   │                 │
+                 成功               失败
+                   │                 │
+                   │                 ▼
+                   │        清洗 Unicode 控制字符
+                   │                 │
+                   │                 ▼
+                   │            再次 readTree
+                   │                 │
+                   │        ┌────────┴───────┐
+                   │        │                │
+                   │       成功             失败
+                   │        │                │
+                   ▼        ▼                ▼
+                       正常业务处理       catch
+                                           │
+                                           ▼
+                                      记录脏数据
+                                           │
+                                           ▼
+                                       当前记录跳过
+```
+
+## 九、为什么正则是这个范围？
+
+我们使用：
+
+```java
+"[\\u0000-\\u001F\\u007F-\\u009F]"
+```
+
+它覆盖了两组 Unicode Control Character。
+
+第一组：
+
+```text
+U+0000 ~ U+001F
+```
+
+即 C0 Control Characters。
+
+里面包括：
+
+```text
+U+0009    TAB
+U+000A    LF
+U+000D    CR
+```
+
+第二组：
+
+```text
+U+007F ~ U+009F
+```
+
+其中：
+
+```text
+U+007F = DEL
+U+0080 ~ U+009F = C1 Control Characters
+```
+
+因此：
+
+```java
+detail.replaceAll(
+    "[\\u0000-\\u001F\\u007F-\\u009F]",
+    " "
+);
+```
+
+不是只针对 `code 9`，而是对这一类控制字符统一兜底。
+
+## 十、如果使用 Flink SQL，也可以提前清洗
+
+如果业务明确要求：
+
+> 这些控制字符没有任何业务意义，直接删除即可。
+
+也可以在 Flink SQL 层处理：
+
+```sql
+REGEXP_REPLACE(
+    COALESCE(bank_account_detail, ''),
+    '[\u0000-\u001F\u007F-\u009F]',
+    ''
+) AS bank_account_detail
+```
+
+或者为了避免字符串黏连：
+
+```sql
+REGEXP_REPLACE(
+    COALESCE(bank_account_detail, ''),
+    '[\u0000-\u001F\u007F-\u009F]',
+    ' '
+) AS bank_account_detail
+```
+
+但 SQL 清洗和 Jackson 宽松解析解决的不是完全相同的问题。
+
+- **SQL 清洗**意味着：修改原始数据。
+- **Jackson `ALLOW_UNESCAPED_CONTROL_CHARS`** 意味着：接受原始数据，但不删除字符。
+
+所以：
+
+```text
+需要保留原始语义
+        ↓
+优先 Jackson 宽松解析
+
+确认控制字符是脏字符
+        ↓
+SQL / Java 清洗即可
+```
+
+## 十一、生产环境还应该增加 DLQ
+
+仅仅 `LOG.warn(...)`、`return;` 虽然可以避免 Flink Job 挂掉，但还有一个问题：
+
+> 这条数据永久丢了。
+
+对于普通日志链路可能可以接受。
+
+但如果处理的是：
+
+- 账户
+- 交易
+- 风控
+- 支付
+- 订单
+
+直接跳过通常是不够的。
+
+更合理的设计是：
+
+```text
+                    Kafka
+                      │
+                      ▼
+                    Flink
+                      │
+                JSON Parse
+                 /        \
+                /          \
+             Success       Failed
+                │             │
+                ▼             ▼
+          Normal Stream     DLQ
+                │             │
+                ▼             ▼
+           Downstream    Dirty Kafka
+                              │
+                              ▼
+                         人工 / 自动修复
+```
+
+例如 DLQ 中记录：
+
+```json
+{
+  "source": "bank_account",
+  "raw_data": "...",
+  "error_type": "JSON_PARSE_ERROR",
+  "error_message": "...",
+  "event_time": "..."
+}
+```
+
+这样就可以做到：
+
+**业务主链路不中断 + 脏数据不丢失 + 后续可回放。**
+
+对于金融、支付、风控链路，这比单纯 `catch → return` 要可靠得多。
+
+## 十二、日志也不能直接打印整条原始数据
+
+还有一个容易被忽略的问题。
+
+不要简单：
+
+```java
+LOG.warn(
+    "invalid detail: {}",
+    detail
+);
+```
+
+因为 `bank_account_detail` 很可能属于敏感信息。
+
+同时，大字段还可能导致：
+
+- 日志量暴增
+- 磁盘占满
+- 日志平台费用上升
+- 敏感信息泄漏
+
+更建议：
+
+```java
+LOG.warn(
+    "invalid bank_account_detail, length={}, error={}",
+    detail.length(),
+    e.getMessage()
+);
+```
+
+如果确实需要定位，可以记录：
+
+- 业务主键
+- 数据来源
+- Kafka partition
+- Kafka offset
+- 错误类型
+
+例如：
+
+```text
+id=123456
+partition=3
+offset=98122345
+error=JSON_PARSE_ERROR
+```
+
+而不是直接 dump 整个账户数据。
+
+## 十三、最终推荐的生产策略
+
+对于这种场景，我最终会采用：
+
+```text
+                上游原始 JSON
+                       │
+                       ▼
+        ┌─────────────────────────┐
+        │ Jackson 宽松读取        │
+        │ ALLOW_UNESCAPED_        │
+        │ CONTROL_CHARS           │
+        └────────────┬────────────┘
+                     │
+              ┌──────┴──────┐
+              │             │
+            成功            失败
+              │             │
+              │             ▼
+              │      清洗控制字符
+              │             │
+              │             ▼
+              │       第二次 JSON Parse
+              │             │
+              │       ┌─────┴─────┐
+              │       │           │
+              │      成功         失败
+              │       │           │
+              ▼       ▼           ▼
+                 业务处理       DLQ
+                      │
+                      ▼
+              Jackson 标准序列化
+                      │
+                      ▼
+               Kafka / 下游系统
+```
+
+对应三个设计原则：
+
+1. **第一，Preserve First。** 优先保留原始数据，不要一上来就删除字符。
+2. **第二，Sanitize as Fallback。** 只有解析失败时才进入清洗降级路径。
+3. **第三，Failure Isolation。** 单条脏数据不能演变成整个 Flink Job 的故障。
+
+## 十四、总结
+
+这次问题表面上只是：
+
+```text
+CTRL-CHAR, code 9
+```
+
+看起来加一句：
+
+```java
+replace("\t", "")
+```
+
+就能解决。
+
+但在生产实时系统里，真正要解决的是：
+
+```text
+异常输入
+    ↓
+如何保证数据语义
+    ↓
+如何保证 JSON 合法
+    ↓
+如何避免 poison message
+    ↓
+如何保证 Flink 主链路可用
+```
+
+因此更完整的方案应该是：
+
+```java
+JsonMapper.builder()
+    .enable(
+        JsonReadFeature.ALLOW_UNESCAPED_CONTROL_CHARS
+    )
+    .build();
+```
+
+作为第一层：**宽松解析 + 保留数据。**
+
+然后：
+
+```java
+detail.replaceAll(
+    "[\\u0000-\\u001F\\u007F-\\u009F]",
+    " "
+);
+```
+
+作为第二层：**脏数据降级清洗。**
+
+最后通过 `try / catch`，以及生产环境中的 `DLQ / Dirty Data Stream`，完成异常隔离。
+
+最终目标不是简单地：
+
+> “Jackson 不报错了。”
+
+而是建立：
+
+**数据异常 ≠ 任务异常。**
+
+这才是 Flink 实时任务面对脏数据时更合理的容错设计。

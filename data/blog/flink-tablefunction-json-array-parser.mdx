@@ -43,7 +43,7 @@ images: ['static/images/avatar_bak.png']
 
 顺带说下外层还有几个容易踩的点：`old`、`pkNames` 这类字段源里有、但下游用不到，默认 JSON 反序列化会忽略未知字段，不影响；但 `database`、`table` 这种词在 Flink 里是保留字，DDL 里要加反引号或干脆不声明。
 
-## 2. 一个坑：为什么不能把内层当 ARRAY<ROW> 去 UNNEST
+## 2. 一个坑：为什么不能把内层当 `ARRAY<ROW>` 去 UNNEST
 
 最初的写法是这样，想“两层都 UNNEST”：
 
@@ -57,7 +57,7 @@ CROSS JOIN UNNEST(u.account_detail) AS b                     -- 想摊开内层
 
 两条路都走不通，分别对应两种误解。
 
-### 2.1 误以为内层是数组：把它声明成 ARRAY<ROW<…>>
+### 2.1 误以为内层是数组：把它声明成 `ARRAY<ROW<…>>`
 
 如果信“这看起来就是个数组”，在 DDL 里把 `account_detail` 写成 `ARRAY<ROW<…>>`，再接 `CROSS JOIN UNNEST`。结果 source 端 JSON 反序列化器一碰就挂，整条消息解析失败，报的是：
 
