@@ -1,0 +1,241 @@
+---
+title: 'Flink SQL 维表关联优化：JDBC FULL Cache 的限制与五种方案'
+date: '2026-10-22'
+tags: ['Flink', 'Kafka', 'OceanBase', 'CDC']
+draft: false
+summary: '从 JDBC PARTIAL Cache 的能力边界出发，对比 CDC Connector、Kafka Changelog、定时快照与自定义 FULL Cache，并说明 OceanBase 版本问题、状态生命周期和恢复风险。'
+images: ['static/images/avatar_bak.png']
+---
+
+维表只有一万行，把缓存容量设置成十万行，为什么 Flink 仍然频繁查询数据库？因为**缓存容量决定能装多少数据，加载机制才决定哪些数据进入缓存**。
+
+本文以一个经过泛化的 IP 名单关联场景说明这个问题：Kafka 提供事件流，OceanBase 保存维表，Flink 1.18 执行关联。假设维表约一万行、更新不频繁，业务允许分钟级刷新，但要求每条事件只查本地数据，未命中也不能回源。表名、字段、地址和规模均用于技术示例，不代表实际生产部署或业务规则。
+
+真正需要保证的是：名单未被业务删除就持续有效；新增、修改、删除能够同步；故障恢复和首次初始化期间，不能把“数据还没加载”误判为“名单里没有”。
+
+## 为什么配置 FULL Cache 会失败
+
+原有 JDBC Lookup Join 的形态是：
+
+```sql
+SELECT e.ip, d.note
+FROM event_source AS e
+LEFT JOIN ip_lookup
+FOR SYSTEM_TIME AS OF e.proctime AS d
+ON e.ip = d.ip;
+```
+
+这里的 `e.proctime` 是处理时间属性。对 JDBC Lookup 而言，这不代表 OceanBase 会查询某个历史时点的数据库快照。
+
+尝试增加以下配置，不能把普通 JDBC Lookup 变成周期性全量缓存：
+
+```sql
+'lookup.cache' = 'FULL',
+'lookup.full-cache.reload-strategy' = 'PERIODIC',
+'lookup.full-cache.periodic-reload.interval' = '5 min',
+'lookup.full-cache.periodic-reload.schedule-mode' = 'FIXED_DELAY'
+```
+
+与 Flink 1.18 文档对应的官方 JDBC SQL Connector 支持 `NONE` 和 `PARTIAL`，不实现这里要求的 FULL Cache。未识别的 `lookup.full-cache.*` 参数会引发配置校验错误。框架具有相关抽象，不等于每个 Connector 都实现了它；排查时还应记录实际加载的 Connector JAR 版本，不能只记录 Flink 版本。[JDBC 官方文档](https://nightlies.apache.org/flink/flink-docs-release-1.18/docs/connectors/table/jdbc/)
+
+## 方案一：JDBC PARTIAL Cache，适用于允许回源的场景
+
+下面只展示 Lookup 相关参数，连接信息应通过部署配置提供：
+
+```sql
+'lookup.cache' = 'PARTIAL',
+'lookup.partial-cache.max-rows' = '100000',
+'lookup.partial-cache.expire-after-write' = '5 min',
+'lookup.partial-cache.cache-missing-key' = 'false',
+'lookup.max-retries' = '3'
+```
+
+PARTIAL 按查询结果填充缓存：命中时读取本地，未命中时查询数据库，过期后再次查询。十万行容量不会触发对一万行维表的预加载。
+
+`cache-missing-key=false` 不缓存空结果，可以避免新增名单被之前的空结果遮蔽，但大量不存在的 IP 会反复回源。开启空结果缓存能减少这类访问，也会引入新增记录的可见性延迟。这是数据库压力与新鲜度之间的取舍。[参数说明](https://nightlies.apache.org/flink/flink-docs-release-1.18/docs/connectors/table/jdbc/)
+
+这个方案代码改动最小，但不满足“未命中绝不访问数据库”。TTL 也不是主动刷新定时器，不能承诺每五分钟全量同步。
+
+## 方案二：OceanBase CDC Connector，直接维护增量维表
+
+CDC 把查询时回源改成持续同步：
+
+```text
+OceanBase → 初始快照 + CDC 增量 → Flink 维表状态
+                                      ↑
+Kafka 事件流 ────────────────────────→ 关联结果
+```
+
+OceanBase CDC Connector 是独立于 JDBC Lookup 的 Source。以 Flink CDC 3.2 文档描述的实现为例，它涉及 OceanBase、驱动与 LogProxy 等组件；必须检查完整版本组合及日志读取条件，不能因为 JDBC 能连通就认定 CDC 可用。这里引用该版本文档解释机制，不表示任意 CDC 版本都兼容 Flink 1.18。[OceanBase CDC 文档](https://nightlies.apache.org/flink/flink-cdc-docs-release-3.2/docs/connectors/flink-sources/oceanbase-cdc/)
+
+> **版本限制：原始问题记录指出，所用 OceanBase 4.3.x 的具体版本存在已知错误，当前环境不支持所需 CDC 链路，因此本次选型不能依赖 CDC Connector。该信息来自问题记录，尚未提供完整补丁版本、公开缺陷编号或修复版本，不能据此推断整个 OceanBase 4.3.x 系列都不支持 CDC。**
+
+官方兼容表列有 OceanBase 4.x，但大版本兼容不等于某个补丁版本和部署组合没有缺陷。[Flink CDC 版本兼容表](https://nightlies.apache.org/flink/flink-cdc-docs-release-3.2/docs/connectors/flink-sources/overview/)
+
+版本问题解决后，可以重新评估该方案：验证初始快照与增量衔接、INSERT/UPDATE/DELETE、断线重连、日志保留窗口和 Checkpoint 恢复。Source 输出 Changelog 也不意味着下游自动成为 Lookup 表，仍需选择事件时间 Temporal Join，或用 Java API 明确定义本地最新状态的关联逻辑。
+
+CDC 的优势是增量更新，代价是日志链路与兼容性维护。若源日志已被清理，旧 Checkpoint 的位点可能无法继续消费，需要重新初始化；不能仅凭开启 Checkpoint 就宣称端到端 Exactly-Once。上述 OceanBase CDC 3.2 实现明确提供 At-Least-Once 读取语义，恢复边界可能重放，必须验证重复变更对下游的影响。
+
+## 方案三：同步平台 + Kafka Changelog + Flink SQL
+
+已有可靠同步平台时，可以让 CloudCanal 等工具负责抽取，Flink 消费标准化变更流：
+
+```text
+OceanBase → 同步平台 → Kafka Changelog → Flink 维表状态
+Kafka 事件流 ─────────────────────────→ Temporal Join
+```
+
+**这不是绕过 OceanBase CDC 故障的通用办法。**如果同步平台依赖同一条受影响的日志链路，它也可能不可用。只有确认抽取方式和版本组合可用后，这个方案才成立；平台原始消息也不一定直接兼容 Upsert Kafka。
+
+### 主键和删除语义先于 SQL
+
+为简化示例，假定 `ip` 在数据库中唯一。Kafka Key 为：
+
+```json
+{ "ip": "192.0.2.10" }
+```
+
+Value 为：
+
+```json
+{ "note": "example entry" }
+```
+
+删除必须产生对应 Key 的真正空 Value，即 Kafka Tombstone，而不是字符串 `"null"`，也不是一条带有 `type=DELETE` 的普通 JSON 数据。
+
+如果原始数据以数据库 ID 为主键，转换成 IP 主键前必须处理重复：两个 ID 对应同一个 IP 时，删除其中一个不能直接删除 IP 状态。需要唯一约束或引用计数。业务主键变化则需要撤销旧 Key，再写入新 Key。
+
+### 事件时间关联不等于读取当前最新值
+
+事件时间 Temporal Join 形态如下，仅用于说明关联语义：
+
+```sql
+SELECT e.event_id, e.ip,
+       CASE WHEN d.ip IS NOT NULL THEN 1 ELSE 0 END AS matched
+FROM event_source AS e
+LEFT JOIN ip_versions
+FOR SYSTEM_TIME AS OF e.event_time AS d
+ON e.ip = d.ip;
+```
+
+前提是左表具备事件时间属性与 Watermark，右表是具有主键和时间属性的版本表，关联条件覆盖右表完整主键。不要直接把 JDBC 的 `proctime` 替换进来并期待相同语义。[Temporal Join 文档](https://nightlies.apache.org/flink/flink-docs-release-1.18/docs/dev/table/sql/queries/joins/)
+
+设计时还必须回答三个问题：
+
+- **版本时间是什么？**Kafka 消息时间不天然等于数据库提交时间，更不一定等于业务生效时间；应定义统一时间轴，处理快照行和删除事件的时间。
+- **低频更新时如何推进 Watermark？**安静的分区可能阻塞输出；idle-timeout 可以缓解等待，但不能证明稍后到达的变更不会迟到。心跳、水位线和迟到策略需要一起验证。
+- **什么时候允许处理事件？**维表快照与 Kafka 初始积压读完之前，需要初始化屏障。启动了两个 Source，不等于右表已经完整。
+
+因此，这个方案适合愿意承担 Changelog 和时间语义维护成本的团队。如果需求是“事件到达时读取已同步的最新名单”，应考虑显式的 Java 状态处理；即使如此，它读取的也只是本地已收到的版本，不是数据库全局实时最新值。
+
+## 方案四：JDBC 定时快照 + Broadcast State
+
+对小维表、低频变更和分钟级刷新需求，这是不依赖 CDC 的优先候选：
+
+```text
+OceanBase → 单并行度 JDBC 定时扫描 → 完整版本化快照
+                                         ↓
+Kafka 事件流 → BroadcastProcessFunction → 本地判断
+```
+
+每个关联并行实例保存完整维表。事件处理只读本地状态，未命中也不访问 OceanBase；下一次完整快照通过整体替换反映新增、修改和删除。
+
+### 刷新必须先构建，再切换
+
+不能先 `clear()` 当前名单，再逐行加载新数据。两条输入异步到达，这个空窗会产生错误的未命中。
+
+以下是协议示意，不是可直接运行的 Source：
+
+```text
+读取一致性数据库快照
+发出 Begin(version, expectedCount)
+发出 Row(version, key, value) ...
+发出 End(version, checksum)
+
+接收端：
+  将新行写入 staging 版本
+  检查版本、唯一键数量与校验信息
+  完整后切换 activeVersion
+  清理旧版本
+```
+
+单个广播生产者有助于保持顺序，仍要处理重试、重复事件和中途恢复。版本号、活动版本、暂存数据与初始化标记必须进入可恢复状态。恢复后要么继续同一快照，要么丢弃未完成暂存版本并重新扫描，不能拼接两次数据库读取的结果。空表可以是合法快照，不能单凭行数为零判断失败，也不能无条件接受异常空结果。
+
+Broadcast State 由各并行实例保存并参与 Checkpoint，占用堆内存，不能假定配置 RocksDB 就能把广播数据转存到磁盘。广播更新逻辑应确定性执行；多个生产者的消息到达顺序可能不同。[Broadcast State 文档](https://nightlies.apache.org/flink/flink-docs-release-1.18/docs/dev/datastream/fault-tolerance/broadcast_state/)
+
+### 恢复和生效时序需要单独设计
+
+- 首次快照完成前，暂停放行、使用有界且可恢复的缓冲，或输出待判定结果；不能默认判为未命中。
+- 刷新失败保留最后一个完整版本，并按快照年龄触发告警或降级；是否继续使用由业务策略决定。
+- Checkpoint 必须覆盖 Source 的快照协议状态和下游状态，单纯写一个定时 JDBC 循环还不够。
+- 不同并行实例切换版本的时刻并不全局同步。如果要求所有事件在同一边界切换，需额外协调或显式携带版本。
+
+内存与 Checkpoint 开销随并行度增加。刷新时还可能同时持有新旧两份数据，应按对象开销、峰值状态和检查点时长测量，而不是只按数据库行数估算。
+
+“五分钟执行一次”也不意味着“五分钟内必定生效”：扫描耗时、调度、反压和失败重试都会增加延迟。应以快照的新鲜度作为验收标准。
+
+## 方案五：自定义 JDBC FULL Cache Lookup Connector
+
+如果必须保留 Dinky + SQL Lookup Join，可以开发专用 Connector：后台读取完整快照，构建不可变 Map，成功后原子替换引用，Lookup 线程只访问当前 Map。
+
+```text
+SQL Lookup → 当前完整快照 → 命中或直接返回空
+                   ↑
+         JDBC 定时全量加载与原子切换
+```
+
+这不只是增加一个 Map。还需要实现 Factory、TableSource 和 Lookup Runtime Provider，处理初始化屏障、连接与线程释放、超时重试、重复键、数据类型、并发刷新以及 Planner/API 兼容性。
+
+缓存通常不是 Flink 托管状态，恢复时要重新加载，且各实例的刷新时刻可能不同。按实例独立扫描还会放大数据库读取压力。这个方案适合跨作业复用、有人长期维护 Connector 的场景；为单张小表引入这套维护成本，通常不划算。
+
+## 五种方案怎么选
+
+| 方案                   | 未命中不回源           | 数据库与运行开销           | 主要复杂度                 | 恢复方式                   |
+| ---------------------- | ---------------------- | -------------------------- | -------------------------- | -------------------------- |
+| JDBC PARTIAL           | 否                     | 未命中和过期触发查询       | 低；管理缓存与数据库 QPS   | 重新 Lookup                |
+| CDC Connector          | 是，使用本地状态关联时 | 初始扫描与持续日志抽取     | 中高；版本、位点与时间语义 | State + 源日志，必要时重建 |
+| 同步平台 + Kafka       | 是                     | 抽取、Kafka 存储与消费     | 中高；消息规范与完整重放   | State + Kafka 或全量重建   |
+| JDBC + Broadcast State | 是                     | 周期扫描；状态按并行度复制 | 中高；快照协议与恢复       | Checkpoint 或重新扫描      |
+| 自定义 FULL Cache      | 是                     | 多实例扫描与本地缓存       | 高；Connector 长期维护     | 重新加载缓存               |
+
+针对本文的示例约束，**优先评估定时一致性快照 + Broadcast State**。它避开受影响的 CDC 链路，代价是 Java 开发和快照协议维护。必须保留纯 SQL 时，自定义 FULL Cache 是备选，但应先评估维护投入。
+
+如果 CDC 版本问题已解决，且更新频率或新鲜度要求提高，再比较直连 CDC 与已有同步平台。PARTIAL 只有在允许回源时才是候选，不能用更大容量冒充全量缓存。
+
+## State TTL、Kafka 保留与恢复不是一回事
+
+名单是否失效应由业务删除或明确有效期决定，不应由“很久没有访问或更新”决定。对相关 SQL 状态，可关闭空闲 TTL：
+
+```sql
+SET 'table.exec.state.ttl' = '0 ms';
+```
+
+它关闭的是该配置控制的空闲状态清理，不会阻止 DELETE，也不会阻止 Temporal Join 根据 Watermark 清理不再需要的历史版本，更不会替你配置 DataStream 自定义状态。[Table 配置](https://nightlies.apache.org/flink/flink-docs-release-1.18/docs/dev/table/config/)
+
+Kafka 作为最新维表的重建来源时，可考虑 `cleanup.policy=compact`；`compact,delete` 还会按保留策略删除日志段，长期未更新的有效记录可能因此丢失。但 compact 也不是永久历史归档：旧版本会消失，Tombstone 有保留期限。
+
+这里有两个不同的恢复问题：
+
+1. **从空状态重建当前名单**：需要完整消费仍保留的最新记录，并在初始化完成后启用判断。
+2. **恢复旧状态或重放历史事件**：旧状态里的记录可能已被删除，而对应 Tombstone 已清理；历史事件需要的维表版本也可能已被压缩。此时仅有 compact topic 不足以保证正确性。
+
+必须让消费者最大停机和追赶时间匹配 Tombstone 保留窗口，定义过期 Checkpoint 的拒绝与重建策略。需要历史时点关联时，还需要历史版本存储或足够完整的变更日志。[Kafka 日志压缩机制](https://kafka.apache.org/37/design/design/#log-compaction)
+
+## 上线验收看什么
+
+| 场景                                 | 必须验证的行为                                   |
+| ------------------------------------ | ------------------------------------------------ |
+| 首次启动、维表未就绪                 | 不把未加载解释为未命中                           |
+| INSERT、UPDATE、DELETE、业务主键变化 | 在约定延迟内正确生效                             |
+| 长期没有更新的有效记录               | 不因空闲而丢失                                   |
+| 扫描失败、空快照、重复行、部分传输   | 不激活损坏版本                                   |
+| TaskManager 重启与快照中途恢复       | 保留或重建完整有效版本                           |
+| Checkpoint 不可用、源日志过期        | 完成重新初始化后才启用判断                       |
+| 大量未知 IP                          | 本地方案不产生回源查询风暴                       |
+| 长时间没有维表事件                   | Temporal Join 不出现未解释的等待或错误水位线推进 |
+
+建议注册 `dimension_initialized`、`dimension_snapshot_version`、`dimension_snapshot_age_seconds`、`dimension_record_count` 和刷新失败计数，并结合 Checkpoint 指标、CDC/Kafka lag 监控。这些是建议的指标名，并非全部由 Flink 自动提供。
+
+对快照方案，还应区分“最近成功加载时间”与“数据库快照对应时间”。刷新刚完成，但扫描已经耗时很久，数据仍可能偏旧。
+
+维表优化的验收标准不只是数据库 QPS 降低。还要能说明数据怎样完整进入状态、什么时候生效、为什么不会无故失效，以及故障之后依靠什么恢复。只有这些边界明确，缓存才真正成为可靠的关联方案。
