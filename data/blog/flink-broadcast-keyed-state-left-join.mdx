@@ -1,0 +1,323 @@
+---
+title: 'Flink Java：使用 Broadcast State 和 Keyed State 实现 LEFT JOIN'
+date: '2026-11-07'
+tags: ['Flink', 'DataStream API', 'Broadcast State', 'Keyed State']
+draft: false
+summary: '介绍如何使用 Broadcast State 和 Keyed State 在 Flink DataStream API 中实现基于维度数据的 LEFT JOIN，并分析数据到达顺序带来的限制。'
+images: ['static/images/avatar_bak.png']
+---
+
+## 一、前言
+
+在日常 Flink 实时计算开发中，经常会遇到将业务数据与维度数据关联的需求。
+
+例如：
+
+- 订单流：包含订单 ID、商品 ID、订单金额。
+- 商品维度流：包含商品 ID、商品名称、商品类别。
+
+我们希望通过商品 ID 将两条数据流关联起来，效果类似 SQL 中的 `LEFT JOIN`：
+
+```sql
+SELECT
+    o.order_id,
+    o.product_id,
+    p.product_name
+FROM order_stream o
+LEFT JOIN product_stream p
+ON o.product_id = p.id;
+```
+
+在关系型数据库中，`LEFT JOIN` 的语义很明确：左表数据全部保留，右表匹配不到时，右表字段填充为 `NULL`。
+
+在 Flink DataStream API 中，可以借助 State 保存维度数据，再根据业务 Key 查询维度状态。本文介绍两种常见实现方式：
+
+1. Broadcast State
+2. Keyed State
+
+## 二、LEFT JOIN 的核心判断
+
+假设维度数据已经保存到了 Flink State 中，那么处理业务数据时，只需要查询一次状态：
+
+```java
+Product product = state.value();
+
+if (product != null) {
+    // 匹配到了维度数据
+} else {
+    // 没有匹配到维度数据
+}
+```
+
+因此，`state != null` 可以理解为 JOIN 成功，`state == null` 可以理解为 LEFT JOIN 中右表没有匹配记录。
+
+不过，这只是 LEFT JOIN 语义中最核心的匹配判断。要实现一个符合业务要求的流式关联，还需要保证左侧业务数据始终输出，并明确处理两条流的到达顺序、维度更新和状态清理。
+
+## 三、使用 Broadcast State 实现 LEFT JOIN
+
+### 3.1 实现原理
+
+如果商品维度数据量较小，可以将商品维度流广播到所有并行实例。每个并行实例都维护一份完整的商品维度状态。
+
+```text
+                   商品维度流
+                       |
+                  Broadcast
+                       |
+          +------------+------------+
+          |            |            |
+       Task 1        Task 2        Task 3
+          |            |            |
+       State         State         State
+          |            |            |
+订单流 --> Task 1   Task 2       Task 3
+          |            |            |
+          +------------+------------+
+                       |
+                    JOIN 结果
+```
+
+当商品维度数据到达时，将其写入 Broadcast State；当订单数据到达时，根据商品 ID 从 Broadcast State 中读取商品维度。
+
+- 查询结果不为 `NULL`：关联成功。
+- 查询结果为 `NULL`：没有匹配到维度数据，但订单仍然输出。
+
+### 3.2 Java 实现
+
+首先定义广播状态描述符：
+
+```java
+MapStateDescriptor<Long, Product> descriptor =
+    new MapStateDescriptor<>(
+        "product-broadcast-state",
+        Long.class,
+        Product.class
+    );
+```
+
+将商品维度流广播，并与订单流连接：
+
+```java
+BroadcastStream<Product> broadcastStream =
+    productStream.broadcast(descriptor);
+
+SingleOutputStreamOperator<OrderResult> result =
+    orderStream
+        .connect(broadcastStream)
+        .process(new BroadcastProcessFunction<
+            Order,
+            Product,
+            OrderResult>() {
+
+            @Override
+            public void processBroadcastElement(
+                    Product product,
+                    Context ctx,
+                    Collector<OrderResult> out) throws Exception {
+
+                BroadcastState<Long, Product> state =
+                    ctx.getBroadcastState(descriptor);
+
+                // 将维度数据写入广播状态
+                state.put(product.getId(), product);
+            }
+
+            @Override
+            public void processElement(
+                    Order order,
+                    ReadOnlyContext ctx,
+                    Collector<OrderResult> out) throws Exception {
+
+                ReadOnlyBroadcastState<Long, Product> state =
+                    ctx.getBroadcastState(descriptor);
+
+                // 根据商品 ID 获取维度数据
+                Product product = state.get(order.getProductId());
+
+                OrderResult result = new OrderResult();
+                result.setOrderId(order.getOrderId());
+                result.setProductId(order.getProductId());
+
+                // LEFT JOIN 核心逻辑
+                if (product != null) {
+                    result.setProductName(product.getName());
+                } else {
+                    result.setProductName(null);
+                }
+
+                // 无论是否匹配，都输出订单数据
+                out.collect(result);
+            }
+        });
+```
+
+### 3.3 特点
+
+Broadcast State 的核心特点：
+
+1. 维度数据广播到所有并行实例。
+2. 每个并行实例维护一份完整的维度状态。
+3. 业务数据可以直接查询本地广播状态。
+4. 维度数据可以动态更新。
+
+它的优点是查询速度快、实现相对简单；缺点是维度数据会在每个并行实例保存一份，维度规模过大时会产生较大的状态存储和资源开销。因此，Broadcast State 更适合小规模维度数据。
+
+## 四、使用 Keyed State 实现 LEFT JOIN
+
+### 4.1 实现原理
+
+如果维度数据量较大，不适合广播，可以考虑 Keyed State。核心思想是根据关联 Key 对两条流进行分区，使相同 Key 的数据进入同一个并行实例。
+
+```text
+订单流                         商品维度流
+  |                                |
+keyBy(productId)              keyBy(id)
+  |                                |
+  +---------------+----------------+
+                  |
+              CoProcess
+                  |
+             Keyed State
+                  |
+               JOIN 结果
+```
+
+Keyed State 不是在所有实例中保存完整维度数据，而是每个实例只维护分配给自己的 Key 对应的状态，从而将维度状态分散到不同并行实例中。
+
+### 4.2 Java 实现
+
+首先按照商品 ID 对两条流进行分区：
+
+```java
+orderStream
+    .keyBy(Order::getProductId)
+    .connect(
+        productStream.keyBy(Product::getId)
+    )
+    .process(new KeyedCoProcessFunction<
+        Long,
+        Order,
+        Product,
+        OrderResult>() {
+
+        private ValueState<Product> productState;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            ValueStateDescriptor<Product> descriptor =
+                new ValueStateDescriptor<>(
+                    "product-state",
+                    Product.class
+                );
+
+            productState = getRuntimeContext().getState(descriptor);
+        }
+
+        // 处理商品维度数据
+        @Override
+        public void processElement2(
+                Product product,
+                Context ctx,
+                Collector<OrderResult> out) throws Exception {
+
+            // 将商品维度保存到 Keyed State
+            productState.update(product);
+        }
+
+        // 处理订单数据
+        @Override
+        public void processElement1(
+                Order order,
+                Context ctx,
+                Collector<OrderResult> out) throws Exception {
+
+            // 根据当前 Key 获取维度状态
+            Product product = productState.value();
+
+            OrderResult result = new OrderResult();
+            result.setOrderId(order.getOrderId());
+            result.setProductId(order.getProductId());
+
+            // LEFT JOIN 核心逻辑
+            if (product != null) {
+                result.setProductName(product.getName());
+            } else {
+                result.setProductName(null);
+            }
+
+            // 无论是否匹配，都输出订单
+            out.collect(result);
+        }
+    });
+```
+
+### 4.3 特点
+
+Keyed State 的核心特点：
+
+1. 根据关联 Key 对数据进行分区。
+2. 相同 Key 的业务数据和维度数据进入同一个并行实例。
+3. 每个 Key 可以维护独立的状态。
+4. 不需要将完整维度数据广播到所有实例。
+
+它能够分布式管理维度状态，适合维度规模较大的场景；但需要额外考虑 Key 分布、状态大小、TTL、状态清理和数据到达顺序等问题。
+
+## 五、两种 State 实现方式对比
+
+| 对比维度     | Broadcast State          | Keyed State              |
+| ------------ | ------------------------ | ------------------------ |
+| 数据分发方式 | 广播                     | 按 Key 分区              |
+| 状态存储     | 每个并行实例保存完整维度 | 每个实例保存分配到的 Key |
+| 维度规模     | 适合较小维度             | 适合较大维度             |
+| 查询方式     | 根据 Map Key 查询        | 根据当前 Key 查询        |
+| 动态更新     | 支持                     | 支持                     |
+| 实现复杂度   | 相对简单                 | 需要正确处理 Key 和状态  |
+
+## 六、必须处理的数据到达顺序
+
+前面的代码都有一个隐含前提：维度数据已经进入 State，然后业务数据才到达。
+
+如果订单先到、商品维度后到，会发生什么？
+
+```text
+T1：订单数据到达，productId = 1001
+T2：查询 State，product = null
+T3：输出订单，productName = null
+T4：商品维度数据到达，id = 1001，name = 手机
+T5：更新 State
+```
+
+此时，T4 更新维度状态并不会自动重新处理 T1 的订单。因此，前面的实现是**基于当前 State 快照进行关联的 LEFT JOIN**，不是会自动等待迟到维度数据的完整流式 LEFT JOIN。
+
+如果业务要求订单先到时等待维度数据，需要额外引入：
+
+- `ListState`：缓存尚未匹配的订单。
+- Timer：设置等待超时时间。
+- 维度数据到达时：重新匹配缓存订单。
+- 超时后：仍未匹配则输出维度字段为 `NULL`。
+
+如果维度数据更新后还需要重新关联历史订单，则需要进一步设计历史数据回溯或结果修正机制。这些都不是简单的 `state != null` 判断能够自动解决的。
+
+此外，生产环境还需要结合业务要求处理数据乱序、状态过期、Checkpoint 恢复、维度更新语义以及热点 Key 等问题。
+
+## 七、总结
+
+Flink DataStream API 实现 LEFT JOIN 的核心，是借助 State 保存维度数据，再通过业务 Key 查询维度状态。
+
+Broadcast State 将维度数据广播到所有并行实例，每个实例维护一份完整维度数据，适合小规模维度表。Keyed State 则根据关联 Key 对数据分区，每个实例维护自己负责的 Key 对应的状态，适合大规模维度数据。
+
+最直观的匹配逻辑是：
+
+```java
+Product product = state.value();
+
+if (product != null) {
+    // JOIN 匹配成功
+} else {
+    // LEFT JOIN 未匹配，维度字段为 NULL
+}
+
+out.collect(result);
+```
+
+记住三个核心概念：State 负责保存关联数据，Key 负责定位关联数据，`NULL` 判断负责表达 LEFT JOIN 的当前匹配语义。
